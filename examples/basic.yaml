@@ -1,0 +1,140 @@
+canarium:
+  mode: disarmed
+  host: 0.0.0.0:8420
+  data_dir: /var/lib/canarium
+  journal_retain: 30d
+
+sources:
+  - name: ups
+    type: nut
+    config:
+      instances:
+        - name: rack_ups
+          host: localhost
+          port: 3493
+          ups: ups
+          poll_interval: 15s
+
+clients:
+  - name: steel
+    description: "Compute node"
+    transport: proxmox
+    address: 10.0.10.11
+    mac: "aa:bb:cc:dd:ee:01"
+    credentials: ${PROXMOX_TOKEN}
+    tags: [compute]
+    feeds: [rack_ups]
+    shutdown_budget: 3m
+    probe:
+      method: tcp
+      port: 22
+    wake:
+      transport: wol
+      broadcast: 10.0.10.255
+
+  - name: vanadium
+    description: "Compute node 2"
+    transport: ssh
+    address: 10.0.10.12
+    mac: "aa:bb:cc:dd:ee:02"
+    tags: [compute]
+    feeds: [rack_ups]
+    shutdown_budget: 2m
+    probe:
+      method: tcp
+      port: 22
+    wake:
+      transport: wol
+      broadcast: 10.0.10.255
+
+  - name: brick
+    description: "TrueNAS storage"
+    transport: truenas
+    address: 10.0.10.20
+    credentials: ${TRUENAS_API_KEY}
+    tags: [storage]
+    feeds: [rack_ups]
+    shutdown_budget: 5m
+    probe:
+      method: tcp
+      port: 443
+    wake:
+      transport: wol
+      mac: "aa:bb:cc:dd:ee:10"
+      broadcast: 10.0.10.255
+    depends_on: []
+
+  - name: niobium
+    description: "OPNsense firewall"
+    transport: opnsense
+    address: 10.0.1.1
+    credentials: ${OPNSENSE_API_KEY}:${OPNSENSE_API_SECRET}
+    tags: [infrastructure]
+    feeds: [rack_ups]
+    shutdown_budget: 2m
+    probe:
+      method: tcp
+      port: 443
+
+plans:
+  - name: outage
+    trigger:
+      condition: state
+      fact: rack_ups.status
+      contains: OB
+      for: 30s
+
+    abort:
+      condition: state
+      fact: rack_ups.status
+      contains: OL
+      for: 60s
+
+    shutdown:
+      stages:
+        - name: compute
+          when:
+            condition: or
+            conditions:
+              - condition: numeric
+                fact: rack_ups.battery.charge
+                below: 50
+              - condition: numeric
+                fact: rack_ups.battery.runtime
+                below: 600
+          clients: [tag:compute]
+          budget: 5m
+          point_of_no_return: true
+
+        - name: storage
+          when:
+            condition: numeric
+            fact: rack_ups.battery.charge
+            below: 35
+          clients: [tag:storage]
+          budget: 5m
+
+        - name: infrastructure
+          when:
+            condition: numeric
+            fact: rack_ups.battery.charge
+            below: 25
+          clients: [tag:infrastructure]
+          budget: 3m
+
+    wake:
+      gate:
+        condition: and
+        conditions:
+          - condition: state
+            fact: rack_ups.status
+            contains: OL
+          - condition: numeric
+            fact: rack_ups.battery.charge
+            above: 60
+            for: 5m
+      stagger: 45s
+      order: reverse
+      probe_interval: 30s
+      boot_deadline: 5m
+      retries: 3

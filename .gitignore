@@ -1,0 +1,26 @@
+# Binaries
+/canarium
+/dist/
+*.exe
+
+# Go
+/vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.svelte-kit/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# State
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
