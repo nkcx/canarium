@@ -20,6 +20,7 @@ import (
 	nutmod "github.com/nkcx/canarium/modules/nut"
 	"github.com/nkcx/canarium/modules/proxmox"
 	"github.com/nkcx/canarium/modules/opnsense"
+	snmpmod "github.com/nkcx/canarium/modules/snmp"
 	"github.com/nkcx/canarium/modules/ssh"
 	"github.com/nkcx/canarium/modules/truenas"
 	"github.com/nkcx/canarium/modules/wol"
@@ -254,6 +255,7 @@ func registerTransports(executor *engine.Executor, cfg *config.Config, logger *s
 	executor.RegisterTransport("truenas", truenas.New(logger))
 	executor.RegisterTransport("opnsense", opnsense.New())
 	executor.RegisterTransport("nut", nutmod.NewTransport(logger))
+	executor.RegisterTransport("snmp-poe", snmpmod.NewPoeTransport(logger))
 }
 
 func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger, executor *engine.Executor) {
@@ -288,6 +290,56 @@ func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger
 			}()
 			go func() {
 				for update := range updates {
+					store.Update(update.Key, update.Value, update.Timestamp)
+				}
+			}()
+
+		case "snmp":
+			var instances []snmpmod.InstanceConfig
+			if cfgData, ok := src.Config["instances"].([]any); ok {
+				for _, inst := range cfgData {
+					if m, ok := inst.(map[string]any); ok {
+						ic := snmpmod.InstanceConfig{
+							Name:         getStr(m, "name"),
+							Host:         getStr(m, "host"),
+							PollInterval: getStr(m, "poll_interval"),
+							Community:    getStr(m, "snmp_community"),
+							User:         getStr(m, "snmp_user"),
+							AuthPass:     getStr(m, "snmp_auth_pass"),
+							PrivPass:     getStr(m, "snmp_priv_pass"),
+						}
+						if p, ok := m["port"].(int); ok {
+							ic.Port = p
+						}
+						if v, ok := m["snmp_version"].(int); ok {
+							ic.Version = v
+						}
+						if oidData, ok := m["oids"].([]any); ok {
+							for _, oidItem := range oidData {
+								if om, ok := oidItem.(map[string]any); ok {
+									ic.OIDs = append(ic.OIDs, snmpmod.OIDSpec{
+										OID:  getStr(om, "oid"),
+										Name: getStr(om, "name"),
+										Type: getStr(om, "type"),
+									})
+								}
+							}
+						}
+						instances = append(instances, ic)
+					}
+				}
+			}
+
+			snmpCfg := snmpmod.Config{Instances: instances}
+			snmpmod.RegisterFacts(store, snmpCfg)
+
+			snmpSource := snmpmod.NewSource(snmpCfg, logger)
+			snmpUpdates := make(chan engine.FactUpdate, 100)
+			go func() {
+				snmpSource.Start(context.Background(), snmpUpdates)
+			}()
+			go func() {
+				for update := range snmpUpdates {
 					store.Update(update.Key, update.Value, update.Timestamp)
 				}
 			}()

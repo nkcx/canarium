@@ -72,6 +72,20 @@ func LoadTimeline(path string) (*Timeline, error) {
 
 func Run(cfg *config.Config, timeline *Timeline, planName string, logger *slog.Logger) (*SimulationResult, error) {
 	store := facts.NewStore()
+
+	seen := make(map[string]bool)
+	for _, evt := range timeline.Events {
+		source := sourceFromFactKey(evt.Fact)
+		if !seen[source] {
+			seen[source] = true
+			store.RegisterSource(source, time.Second, nil)
+		}
+		factName := evt.Fact[len(source)+1:]
+		store.RegisterSource(source, time.Second, []facts.FactDeclaration{
+			{Name: factName, Type: "number"},
+		})
+	}
+
 	evaluator := conditions.NewEvaluator(store)
 
 	var targetPlan *config.PlanConfig
@@ -161,4 +175,13 @@ func Run(cfg *config.Config, timeline *Timeline, planName string, logger *slog.L
 	}
 
 	return result, nil
+}
+
+func sourceFromFactKey(key string) string {
+	for i, c := range key {
+		if c == '.' {
+			return key[:i]
+		}
+	}
+	return key
 }

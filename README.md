@@ -51,4 +51,10 @@ Sources → Fact Context → Policy → Planner → Executor → Transports
 
 **Shipped transports:** Proxmox, TrueNAS, OPNsense
 
+## Security notes
+
+- **SSH host key verification:** The SSH transport currently uses `InsecureIgnoreHostKey()`. This is a known limitation for v1 — host key verification against a known_hosts file is planned for a future release.
+- **TLS:** Canarium does not terminate TLS directly. Use a reverse proxy (Traefik, nginx, Caddy) for HTTPS.
+- **Auth:** v1 ships with single local admin authentication. Federated auth (OIDC, LDAP) is planned for v2.
+
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.
