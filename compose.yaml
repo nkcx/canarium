@@ -1,0 +1,63 @@
+# Canarium + NUT deployment
+#
+# Prerequisites:
+#   1. Find your UPS USB device: lsusb | grep -i ups
+#   2. Copy .env.example to .env and fill in your values
+#   3. docker compose up -d
+#
+# NUT configuration:
+#   For most USB-connected UPS units, the env vars below are sufficient.
+#   For advanced setups (custom drivers, multiple UPS, SNMP UPS), mount
+#   config files into /etc/nut/local/ — see instantlinux/nut-upsd docs.
+#
+# Finding your UPS:
+#   Most consumer UPS units (APC, CyberPower, Eaton) use the usbhid-ups
+#   driver. Run `nut-scanner -U` inside the container to auto-detect,
+#   or check: https://networkupstools.org/stable-hcl.html
+
+services:
+  nut:
+    image: instantlinux/nut-upsd:latest
+    container_name: nut
+    restart: unless-stopped
+    environment:
+      - API_USER=canarium
+      - API_PASSWORD=${NUT_PASSWORD}
+      - DRIVER=${NUT_DRIVER:-usbhid-ups}
+      - NAME=${NUT_UPS_NAME:-ups}
+      - PORT=auto
+      - DESCRIPTION=${NUT_DESCRIPTION:-Rack UPS}
+      - SERIAL=${NUT_SERIAL:-}
+      - VENDORID=${NUT_VENDORID:-}
+      - POLLINTERVAL=${NUT_POLL_INTERVAL:-15}
+      - MAXAGE=${NUT_MAXAGE:-15}
+    ports:
+      - "3493:3493"
+    # USB passthrough — required for local UPS connection.
+    # Option 1 (recommended): pass the specific USB device.
+    #   Find it with: lsusb | grep -i ups
+    #   Example: Bus 001 Device 004 → /dev/bus/usb/001/004
+    # Option 2: privileged mode (less secure, but survives USB re-enumeration)
+    #
+    # Uncomment ONE of these:
+    # devices:
+    #   - /dev/bus/usb/001/004:/dev/bus/usb/001/004
+    privileged: true
+
+  canarium:
+    image: ghcr.io/nkcx/canarium:latest
+    container_name: canarium
+    restart: unless-stopped
+    depends_on:
+      - nut
+    ports:
+      - "8420:8420"
+    volumes:
+      - ./canarium.yaml:/etc/canarium/config.yaml:ro
+      - canarium-data:/var/lib/canarium
+    # Uncomment for GPIO support on Raspberry Pi:
+    # devices:
+    #   - /dev/gpiochip0:/dev/gpiochip0
+
+volumes:
+  canarium-data:

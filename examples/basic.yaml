@@ -4,15 +4,20 @@ canarium:
   data_dir: /var/lib/canarium
   journal_retain: 30d
 
+# NUT source — connects to the nut-upsd container (or any NUT server).
+# When using compose.yaml, the host is the service name "nut".
+# When NUT runs on the same host natively, use "localhost".
 sources:
   - name: ups
     type: nut
     config:
       instances:
         - name: rack_ups
-          host: localhost
+          host: nut
           port: 3493
           ups: ups
+          username: canarium
+          password: ${NUT_PASSWORD}
           poll_interval: 15s
 
 clients:

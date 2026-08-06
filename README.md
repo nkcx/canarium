@@ -31,12 +31,32 @@ make build
 ./canarium simulate --plan outage --timeline timeline.json -c config.yaml
 ```
 
-## Docker
+## Docker (with NUT)
+
+Canarium reads from [NUT](https://networkupstools.org/) — it doesn't talk to UPS hardware directly. The included `compose.yaml` runs both services together using [instantlinux/nut-upsd](https://hub.docker.com/r/instantlinux/nut-upsd):
+
+```bash
+# 1. Configure
+cp .env.example .env          # edit with your NUT password + client credentials
+cp examples/basic.yaml canarium.yaml  # edit with your clients and plans
+
+# 2. Find your UPS USB device
+lsusb | grep -i ups            # note the Bus/Device numbers
+
+# 3. Update compose.yaml with your USB device path (or use privileged mode)
+
+# 4. Deploy
+docker compose up -d
+```
+
+NUT is configured via environment variables in `.env` — no separate config files needed for standard USB UPS setups. For advanced configurations (custom drivers, SNMP UPS, multiple units), mount config files into the NUT container's `/etc/nut/local/` directory.
+
+To run Canarium standalone (without the bundled NUT container):
 
 ```bash
 docker run -d \
   -p 8420:8420 \
-  -v ./config.yaml:/etc/canarium/config.yaml \
+  -v ./canarium.yaml:/etc/canarium/config.yaml \
   -v canarium-data:/var/lib/canarium \
   ghcr.io/nkcx/canarium:latest
 ```
