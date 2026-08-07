@@ -1,4 +1,4 @@
-FROM node:22-alpine AS frontend
+FROM --platform=linux/amd64 node:22-alpine AS frontend
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
