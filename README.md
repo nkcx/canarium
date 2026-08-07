@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/Canarium.jpg" alt="Canarium" width="300">
+  <img src="docs/Canarium.jpg" alt="Canarium" width="250">
 </p>
 
 # Canarium
