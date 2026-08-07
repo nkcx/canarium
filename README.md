@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/Canarium.jpg" alt="Canarium" width="300">
+</p>
+
 # Canarium
 
 Canarium monitors environmental conditions -- power loss, temperature, flooding -- and orchestrates the orderly transition of your infrastructure from up to down. When those conditions clear, it brings everything back up again, in the right order, verified and safe.
