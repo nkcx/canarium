@@ -63,6 +63,8 @@ docker compose up -d
 
 NUT is configured via environment variables in `.env` -- no separate config files needed for standard USB UPS setups. For advanced configurations (custom drivers, SNMP UPS, multiple units), mount config files into the NUT container's `/etc/nut/local/` directory.
 
+**WOL and multi-VLAN:** Each client's wake config targets a specific broadcast address for its subnet. Canarium infers this from the client IP when possible, but for multi-VLAN setups you should set it explicitly (`broadcast: 10.0.10.255`). To reach multiple VLANs from Docker, attach the container to macvlan or ipvlan networks -- see the commented examples in `compose.yaml`.
+
 To run Canarium standalone (without the bundled NUT container):
 
 ```bash

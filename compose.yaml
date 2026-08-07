@@ -15,17 +15,25 @@
 #   driver. Run `nut-scanner -U` inside the container to auto-detect,
 #   or check: https://networkupstools.org/stable-hcl.html
 #
-# Networking:
-#   Canarium uses host networking so it can send WOL broadcast packets
-#   to your physical LAN and perform ARP resolution. This is required —
-#   Docker's default bridge network isolates broadcast traffic.
+# WOL and multi-VLAN networking:
+#   WOL magic packets are UDP broadcasts. Each client's wake config
+#   specifies a broadcast address targeting the correct subnet/VLAN.
+#   Canarium infers the broadcast from the client IP when possible,
+#   but for multi-VLAN setups you should set it explicitly:
+#
+#     wake:
+#       transport: wol
+#       broadcast: 10.0.10.255    # target the client's VLAN
+#
+#   For the container to reach multiple VLANs, attach it to the
+#   appropriate Docker networks (macvlan, ipvlan, or bridged to
+#   the correct interfaces). See the Traefik example below.
 
 services:
   nut:
     image: instantlinux/nut-upsd:latest
     container_name: nut
     restart: unless-stopped
-    network_mode: host
     environment:
       - API_USER=canarium
       - API_PASSWORD=${NUT_PASSWORD}
@@ -37,6 +45,8 @@ services:
       - VENDORID=${NUT_VENDORID:-}
       - POLLINTERVAL=${NUT_POLL_INTERVAL:-15}
       - MAXAGE=${NUT_MAXAGE:-15}
+    ports:
+      - "3493:3493"
     # USB passthrough — required for local UPS connection.
     # Option 1 (recommended): pass the specific USB device.
     #   Find it with: lsusb | grep -i ups
@@ -52,15 +62,40 @@ services:
     image: ghcr.io/nkcx/canarium:latest
     container_name: canarium
     restart: unless-stopped
-    network_mode: host
     depends_on:
       - nut
+    ports:
+      - "8420:8420"
     volumes:
       - ./canarium.yaml:/etc/canarium/config.yaml:ro
       - canarium-data:/var/lib/canarium
     # Uncomment for GPIO support on Raspberry Pi:
     # devices:
     #   - /dev/gpiochip0:/dev/gpiochip0
+    #
+    # Multi-VLAN WOL: attach to Docker networks that can reach your
+    # target subnets. Example with macvlan:
+    #
+    # networks:
+    #   - default
+    #   - vlan10
+    #
+    # Traefik: add labels and remove the ports section:
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.canarium.rule=Host(`canarium.example.com`)"
+    #   - "traefik.http.services.canarium.loadbalancer.server.port=8420"
 
 volumes:
   canarium-data:
+
+# Example macvlan network for WOL on VLAN 10:
+# networks:
+#   vlan10:
+#     driver: macvlan
+#     driver_opts:
+#       parent: eth0.10
+#     ipam:
+#       config:
+#         - subnet: 10.0.10.0/24
+#           gateway: 10.0.10.1

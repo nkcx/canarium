@@ -35,8 +35,7 @@ clients:
       port: 22
     wake:
       transport: wol
-      # broadcast is inferred from client IP + host subnet
-      # override: broadcast: 10.0.10.255
+      broadcast: 10.0.10.255    # target subnet for WOL; set per VLAN
 
   - name: vanadium
     description: "Compute node 2"
@@ -51,6 +50,7 @@ clients:
       port: 22
     wake:
       transport: wol
+      broadcast: 10.0.10.255
 
   - name: brick
     description: "TrueNAS storage"
@@ -66,6 +66,7 @@ clients:
     wake:
       transport: wol
       mac: "aa:bb:cc:dd:ee:10"
+      broadcast: 10.0.10.255
     depends_on: []
 
   - name: niobium
