@@ -7,9 +7,11 @@
 
 ## 1. Summary
 
-Canarium is a lightweight, embedded-first power-event orchestrator. It runs on minimal hardware — a Raspberry Pi or any Linux SBC — and orchestrates ordered, staged, verified infrastructure transitions in response to environmental conditions. It observes facts from pluggable sources (UPS state, temperature, GPIO sensors), evaluates policy conditions, and executes shutdown and wake plans with dependency awareness, safety constraints, and verification.
+Canarium monitors environmental conditions — power loss, temperature, flooding — and orchestrates the orderly transition of your infrastructure from up to down. When those conditions clear, it brings everything back up again, in the right order, verified and safe.
 
-It does not perform arbitrary automations; every action is part of a plan with stages, dependencies, and safety constraints.
+It is not a monitoring tool or an early warning system. It is the thing that actually does something when the environment changes: shuts down your servers in the right order before the battery runs out, then wakes them back up when power returns and the UPS has recharged.
+
+It runs on minimal hardware — a Raspberry Pi or any Linux SBC. It does not perform arbitrary automations; every action is part of a plan with stages, dependencies, and safety constraints.
 
 It is not a UPS monitor. NUT already does that job well. Canarium is the policy and execution layer that NUT deliberately does not provide.
 
