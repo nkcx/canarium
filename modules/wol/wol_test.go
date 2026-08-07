@@ -1,6 +1,7 @@
 package wol
 
 import (
+	"net"
 	"testing"
 )
 
@@ -64,5 +65,43 @@ func TestBuildMagicPacketInvalid(t *testing.T) {
 	_, err = buildMagicPacket("gg:hh:ii:jj:kk:ll")
 	if err == nil {
 		t.Error("expected error for non-hex MAC")
+	}
+}
+
+func TestBroadcastFromCIDR(t *testing.T) {
+	tests := []struct {
+		ip   string
+		mask int
+		want string
+	}{
+		{"10.0.10.11", 24, "10.0.10.255"},
+		{"10.0.10.11", 16, "10.0.255.255"},
+		{"192.168.1.100", 24, "192.168.1.255"},
+		{"172.16.0.5", 12, "172.31.255.255"},
+		{"10.0.10.11", 32, "10.0.10.11"},
+		{"10.0.10.11", 8, "10.255.255.255"},
+	}
+
+	for _, tt := range tests {
+		ip := net.ParseIP(tt.ip).To4()
+		mask := net.CIDRMask(tt.mask, 32)
+		got := broadcastFromCIDR(ip, mask)
+		if got != tt.want {
+			t.Errorf("broadcastFromCIDR(%s, /%d) = %s, want %s", tt.ip, tt.mask, got, tt.want)
+		}
+	}
+}
+
+func TestInferBroadcastInvalidIP(t *testing.T) {
+	got := inferBroadcast("not-an-ip", nil)
+	if got != "" {
+		t.Errorf("inferBroadcast(invalid) = %s, want empty", got)
+	}
+}
+
+func TestInferBroadcastIPv6(t *testing.T) {
+	got := inferBroadcast("::1", nil)
+	if got != "" {
+		t.Errorf("inferBroadcast(ipv6) = %s, want empty", got)
 	}
 }

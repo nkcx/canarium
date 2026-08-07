@@ -248,7 +248,7 @@ func runDaemon(configPath string) error {
 
 func registerTransports(executor *engine.Executor, cfg *config.Config, logger *slog.Logger) {
 	executor.RegisterTransport("ssh", ssh.New(ssh.Config{}))
-	executor.RegisterTransport("wol", wol.New(wol.Config{}))
+	executor.RegisterTransport("wol", wol.New(wol.Config{}, logger))
 	executor.RegisterTransport("exec", execmod.New())
 	executor.RegisterTransport("rest", restmod.New())
 	executor.RegisterTransport("proxmox", proxmox.New())

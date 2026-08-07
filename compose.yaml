@@ -14,12 +14,18 @@
 #   Most consumer UPS units (APC, CyberPower, Eaton) use the usbhid-ups
 #   driver. Run `nut-scanner -U` inside the container to auto-detect,
 #   or check: https://networkupstools.org/stable-hcl.html
+#
+# Networking:
+#   Canarium uses host networking so it can send WOL broadcast packets
+#   to your physical LAN and perform ARP resolution. This is required —
+#   Docker's default bridge network isolates broadcast traffic.
 
 services:
   nut:
     image: instantlinux/nut-upsd:latest
     container_name: nut
     restart: unless-stopped
+    network_mode: host
     environment:
       - API_USER=canarium
       - API_PASSWORD=${NUT_PASSWORD}
@@ -31,8 +37,6 @@ services:
       - VENDORID=${NUT_VENDORID:-}
       - POLLINTERVAL=${NUT_POLL_INTERVAL:-15}
       - MAXAGE=${NUT_MAXAGE:-15}
-    ports:
-      - "3493:3493"
     # USB passthrough — required for local UPS connection.
     # Option 1 (recommended): pass the specific USB device.
     #   Find it with: lsusb | grep -i ups
@@ -48,10 +52,9 @@ services:
     image: ghcr.io/nkcx/canarium:latest
     container_name: canarium
     restart: unless-stopped
+    network_mode: host
     depends_on:
       - nut
-    ports:
-      - "8420:8420"
     volumes:
       - ./canarium.yaml:/etc/canarium/config.yaml:ro
       - canarium-data:/var/lib/canarium
