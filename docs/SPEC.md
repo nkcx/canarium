@@ -481,10 +481,16 @@ clients:
   - name: poe-cameras
     transport: snmp-poe
     address: 10.0.1.2
-    snmp:
-      version: 3
-      credentials: ${SWITCH_SNMP}
-    ports: [{group: 1, port: 5}, {group: 1, port: 6}]
+    tags: [nonessential]
+    shutdown_budget: 0s
+    config:
+      snmp_version: 3
+      snmp_user: canarium
+      snmp_auth_pass: ${SWITCH_AUTH_PASS}
+      snmp_priv_pass: ${SWITCH_PRIV_PASS}
+      ports:
+        - { group: 1, port: 5 }
+        - { group: 1, port: 6 }
 ```
 
 Caveats:
