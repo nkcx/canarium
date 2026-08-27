@@ -221,6 +221,17 @@ func (t *PoeTransport) Capabilities() []engine.Capability {
 	}
 }
 
+func (t *PoeTransport) RemapAction(action engine.ActionType) engine.ActionType {
+	switch action {
+	case engine.ActionShutdown:
+		return engine.ActionPoeOff
+	case engine.ActionWake:
+		return engine.ActionPoeOn
+	default:
+		return action
+	}
+}
+
 func (t *PoeTransport) Execute(ctx context.Context, client *engine.Client, action engine.ActionType) (*engine.ActionResult, error) {
 	switch action {
 	case engine.ActionPoeOff, engine.ActionPoeOn:

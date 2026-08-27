@@ -71,6 +71,13 @@ func (e *Executor) RegisterTransport(name string, t Transport) {
 	e.transports[name] = t
 }
 
+func remapAction(t Transport, action ActionType) ActionType {
+	if r, ok := t.(ActionRemapper); ok {
+		return r.RemapAction(action)
+	}
+	return action
+}
+
 func (e *Executor) AddListener(l EventListener) {
 	e.mu.Lock()
 	e.listeners = append(e.listeners, l)
@@ -476,7 +483,7 @@ func (e *Executor) shutdownClient(name string, seq *state.Sequence, budget time.
 	ctx, cancel := context.WithTimeout(e.ctx, budget)
 	defer cancel()
 
-	result, err := t.Execute(ctx, client, ActionShutdown)
+	result, err := t.Execute(ctx, client, remapAction(t, ActionShutdown))
 	intent.Status = "dispatched"
 	if err != nil {
 		intent.Result = &state.ActionResult{Success: false, Message: err.Error()}
@@ -674,7 +681,7 @@ func (e *Executor) wakeClient(name string, plan *config.PlanConfig, seq *state.S
 			return
 		}
 
-		_, err := t.Execute(e.ctx, client, ActionWake)
+		_, err := t.Execute(e.ctx, client, remapAction(t, ActionWake))
 		if err != nil {
 			e.logger.Error("wake command failed", "client", name, "error", err, "attempt", attempt)
 		}

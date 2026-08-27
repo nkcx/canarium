@@ -107,6 +107,10 @@ type Transport interface {
 	Probe(ctx context.Context, client *Client) (ClientState, error)
 }
 
+type ActionRemapper interface {
+	RemapAction(action ActionType) ActionType
+}
+
 type Source interface {
 	Name() string
 	Declarations() []SourceDeclaration
