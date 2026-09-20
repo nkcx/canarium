@@ -1,0 +1,32 @@
+# Never copy secrets into the build context. `COPY . .` would otherwise bake
+# a local .env into an image layer that gets pushed to a registry.
+.env
+.env.*
+!.env.example
+
+# Version control and CI
+.git
+.github
+.gitignore
+
+# Build outputs — regenerated inside the image
+canarium
+dist/
+web/dist/
+web/node_modules/
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+
+# Editor and OS cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Documentation not needed at build time
+docs/
+README.md
