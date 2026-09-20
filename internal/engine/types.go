@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -220,13 +221,27 @@ func (m Mode) String() string {
 	}
 }
 
+// ParseMode maps a mode name to a Mode, defaulting to disarmed.
+//
+// The default is deliberate for config loading: an unrecognised value should
+// leave the system inert rather than guess. Callers that need to reject a
+// typo rather than silently disarm should use ParseModeStrict.
 func ParseMode(s string) Mode {
-	switch s {
+	mode, _ := ParseModeStrict(s)
+	return mode
+}
+
+// ParseModeStrict maps a mode name to a Mode, reporting whether it was
+// recognised.
+func ParseModeStrict(s string) (Mode, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "disarmed":
+		return ModeDisarmed, true
 	case "dry-run", "dryrun", "dry_run":
-		return ModeDryRun
+		return ModeDryRun, true
 	case "armed":
-		return ModeArmed
+		return ModeArmed, true
 	default:
-		return ModeDisarmed
+		return ModeDisarmed, false
 	}
 }

@@ -20,8 +20,21 @@ type DB struct {
 	db *sql.DB
 }
 
+const (
+	// dataDirMode keeps the state directory private to the daemon's user.
+	// It holds the admin password hash, live session tokens and API token
+	// digests; the previous 0755 made all of that world-readable.
+	dataDirMode = 0o700
+
+	// dbFileMode likewise restricts the database file itself.
+	dbFileMode = 0o600
+
+	// busyTimeoutMS is how long a writer waits for a competing one.
+	busyTimeoutMS = 5000
+)
+
 func Open(dataDir string) (*DB, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, dataDirMode); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
 
@@ -29,17 +42,45 @@ func Open(dataDir string) (*DB, error) {
 	dsn := dbPath + "?" + strings.Join([]string{
 		"_pragma=journal_mode(WAL)",
 		"_pragma=synchronous(NORMAL)",
-		"_pragma=busy_timeout(5000)",
+		fmt.Sprintf("_pragma=busy_timeout(%d)", busyTimeoutMS),
 		"_pragma=foreign_keys(ON)",
 	}, "&")
+
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
+	// SQLite permits one writer at a time. Letting database/sql open an
+	// unbounded pool means concurrent writers — a stage shutting down eight
+	// clients at once, each recording an intent — contend for the write lock
+	// and rely on busy_timeout to sort it out. Serialising writes in the
+	// pool avoids the contention entirely.
+	//
+	// Reads would benefit from a separate pool, but the write volume here is
+	// a handful of rows per sequence; the simplicity is worth more.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening database at %s: %w", dbPath, err)
+	}
+
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating database: %w", err)
+	}
+
+	// Applied after creation, since the file does not exist until the first
+	// connection. WAL mode creates -wal and -shm siblings that inherit the
+	// directory's permissions.
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(path, dbFileMode); err != nil && !os.IsNotExist(err) {
+			db.Close()
+			return nil, fmt.Errorf("restricting permissions on %s: %w", path, err)
+		}
 	}
 
 	return &DB{db: db}, nil

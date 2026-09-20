@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +26,7 @@ import (
 	"github.com/nkcx/canarium/internal/simulate"
 	"github.com/nkcx/canarium/internal/state"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var version = "dev"
@@ -58,6 +61,7 @@ func main() {
 		doctorCmd(&configPath),
 		simulateCmd(&configPath),
 		tokenCmd(&configPath),
+		hashPasswordCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -116,6 +120,84 @@ func reportValidation(result *config.ValidationResult, verbose bool) bool {
 		}
 	}
 	return result.HasErrors()
+}
+
+// hashPasswordCmd produces a hash suitable for canarium.auth.password_hash.
+func hashPasswordCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "hash-password",
+		Short: "Hash a password for canarium.auth.password_hash",
+		Long: "Read a password from the terminal and print its bcrypt hash.\n\n" +
+			"Put the result in canarium.auth.password_hash to pin the admin\n" +
+			"password in the configuration file rather than the database. Useful\n" +
+			"for immutable deployments whose database is ephemeral.\n\n" +
+			"The password is read from the terminal without echoing, so it does\n" +
+			"not end up in shell history.",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			interactive := term.IsTerminal(int(os.Stdin.Fd()))
+
+			password, err := readPassword("Password: ", interactive)
+			if err != nil {
+				return err
+			}
+			if len(password) < api.MinPasswordLength {
+				return fmt.Errorf("password must be at least %d characters", api.MinPasswordLength)
+			}
+
+			// Confirmation guards against a typo nobody can see. Piped input
+			// has already been typed once somewhere else, and a second read
+			// would consume a line the caller did not intend to supply.
+			if interactive {
+				confirm, err := readPassword("Confirm: ", true)
+				if err != nil {
+					return err
+				}
+				if password != confirm {
+					return fmt.Errorf("passwords do not match")
+				}
+			}
+
+			hash, err := api.HashPassword(password)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("\ncanarium:\n  auth:\n    password_hash: %q\n", hash)
+			return nil
+		},
+	}
+}
+
+// readPassword reads a password, without echoing when attached to a
+// terminal.
+//
+// Prompts go to stderr so `canarium hash-password > config-snippet.yaml`
+// works without the prompt ending up in the file.
+func readPassword(prompt string, interactive bool) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	defer fmt.Fprintln(os.Stderr)
+
+	if !interactive {
+		// Piped input, for scripted use. Read exactly one line: buffering
+		// ahead would swallow input the caller intended for something else.
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("reading password: %w", err)
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return "", fmt.Errorf("no password supplied on stdin")
+		}
+		return line, nil
+	}
+
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return "", fmt.Errorf("reading password: %w", err)
+	}
+	return strings.TrimSpace(string(raw)), nil
 }
 
 func runCmd(configPath *string) *cobra.Command {
@@ -430,9 +512,10 @@ func runDaemon(configPath string) error {
 	}
 
 	server := api.NewServer(cfg, store, executor, db, canarium.WebFS, logger)
+	server.SetVersion(version)
 	executor.AddListener(server.EventListener())
 
-	warnIfNoAdminPassword(db, logger)
+	warnIfNoAdminPassword(cfg, db, logger)
 
 	if err := executor.Start(); err != nil {
 		return fmt.Errorf("starting executor: %w", err)
@@ -471,7 +554,13 @@ func runDaemon(configPath string) error {
 // been set. Until one is, every authenticated endpoint refuses requests and
 // the UI shows its first-run screen, so the daemon is not exposed — but the
 // operator needs to know the web UI is not yet usable.
-func warnIfNoAdminPassword(db *state.DB, logger *slog.Logger) {
+func warnIfNoAdminPassword(cfg *config.Config, db *state.DB, logger *slog.Logger) {
+	if cfg.Canarium.Auth.PasswordHash != "" {
+		logger.Info("admin password is pinned by the configuration file; " +
+			"first-run setup is disabled")
+		return
+	}
+
 	hash, err := db.GetPasswordHash()
 	if err != nil {
 		logger.Error("could not determine whether an admin password is set", "error", err)

@@ -582,3 +582,107 @@ func TestScopeAllows(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigReadonlyRefusesModeChanges covers a setting that was declared in
+// the config schema and never read by anything.
+func TestConfigReadonlyRefusesModeChanges(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.ConfigReadonly = true
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	rec := do(t, s, "POST", "/api/mode", `{"mode":"armed"}`, cookie)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409 — config_readonly must refuse runtime mode changes", rec.Code)
+	}
+	if s.executor.Mode() == engineModeArmed() {
+		t.Error("the mode changed despite config_readonly")
+	}
+}
+
+func TestModeChangesAreAcceptedWhenNotReadonly(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	if rec := do(t, s, "POST", "/api/mode", `{"mode":"dry-run"}`, cookie); rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := s.executor.Mode().String(); got != "dry-run" {
+		t.Errorf("mode = %q, want dry-run", got)
+	}
+}
+
+// TestInvalidModeIsRejected: ParseMode falls back to disarmed, so a typo
+// would have quietly disarmed the system while returning 200.
+func TestInvalidModeIsRejected(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	if rec := do(t, s, "POST", "/api/mode", `{"mode":"armned"}`, cookie); rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400 for a misspelled mode", rec.Code)
+	}
+}
+
+// TestPinnedPasswordHashTakesPrecedence covers an immutable deployment whose
+// database is ephemeral: it must not present a first-run setup screen — and
+// a window in which anyone could claim it — on every restart.
+func TestPinnedPasswordHashTakesPrecedence(t *testing.T) {
+	hash, err := HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.Auth.PasswordHash = hash
+
+	// Setup must not be offered, even though the database is empty.
+	got := decode(t, do(t, s, "GET", "/api/auth/status", ""))
+	if got["setup_required"] != false {
+		t.Errorf("setup_required = %v with a pinned hash, want false", got["setup_required"])
+	}
+	if got["password_pinned"] != true {
+		t.Errorf("password_pinned = %v, want true", got["password_pinned"])
+	}
+
+	// And the pinned password works.
+	sessionCookie(t, s)
+}
+
+func TestSetupIsRefusedWhenPasswordIsPinned(t *testing.T) {
+	hash, err := HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.Auth.PasswordHash = hash
+
+	rec := do(t, s, "POST", "/api/auth/setup", `{"password":"attacker-chosen-password"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("got %d, want 403 — setup must not override a config-pinned password", rec.Code)
+	}
+}
+
+func TestHealthReportsVersion(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.SetVersion("v1.2.3")
+
+	got := decode(t, do(t, s, "GET", "/api/health", ""))
+	if got["version"] != "v1.2.3" {
+		t.Errorf("version = %v, want v1.2.3", got["version"])
+	}
+}
+
+// engineModeArmed is a small helper so the test reads clearly.
+func engineModeArmed() engine.Mode { return engine.ParseMode("armed") }

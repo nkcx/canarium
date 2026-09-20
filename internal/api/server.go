@@ -56,6 +56,9 @@ type Server struct {
 	wsMu      sync.RWMutex
 	wsClients map[*wsClient]struct{}
 
+	// version is reported by the health endpoint.
+	version string
+
 	// loginLimiter throttles repeated failed logins per source address.
 	loginLimiter *failureLimiter
 
@@ -92,6 +95,9 @@ func NewServer(
 	s.routes()
 	return s
 }
+
+// SetVersion records the build version for the health endpoint.
+func (s *Server) SetVersion(v string) { s.version = v }
 
 func (s *Server) routes() {
 	// Unauthenticated: the healthcheck and the endpoints needed to
@@ -192,8 +198,9 @@ func (s *Server) reapExpiredSessions() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"mode":   s.executor.Mode().String(),
+		"status":  "ok",
+		"mode":    s.executor.Mode().String(),
+		"version": s.version,
 	})
 }
 
@@ -310,6 +317,17 @@ func (s *Server) handleSequence(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
+	// config_readonly makes the file authoritative. Accepting a mode change
+	// that the next deploy would silently revert is exactly the drift this
+	// setting exists to prevent.
+	if s.cfg.Canarium.ConfigReadonly {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "config_readonly is set; change canarium.mode in the " +
+				"configuration file and restart",
+		})
+		return
+	}
+
 	var req struct {
 		Mode string `json:"mode"`
 	}
@@ -318,9 +336,26 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode := engine.ParseMode(req.Mode)
+	// ParseMode falls back to disarmed for anything unrecognised, which
+	// would quietly turn a typo into a disarmed system.
+	mode, ok := engine.ParseModeStrict(req.Mode)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid mode " + req.Mode + " (expected disarmed, dry-run or armed)",
+		})
+		return
+	}
+
+	previous := s.executor.Mode()
 	s.executor.SetMode(mode)
-	s.db.SetKV("mode", mode.String())
+
+	if err := s.db.SetKV("mode", mode.String()); err != nil {
+		s.logger.Error("persisting mode", "error", err)
+	}
+
+	s.logger.Warn("operating mode changed",
+		"from", previous.String(), "to", mode.String(),
+		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders))
 
 	writeJSON(w, http.StatusOK, map[string]string{"mode": mode.String()})
 }
@@ -394,7 +429,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storedHash, err := s.db.GetPasswordHash()
+	storedHash, err := s.passwordHash()
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -429,8 +464,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.loginLimiter.Reset(source)
 
 	// Transparently migrate a legacy unsalted SHA-256 hash to bcrypt now that
-	// we hold the plaintext. A failure here must not block the login.
-	if needsUpgrade {
+	// we hold the plaintext. A failure here must not block the login, and a
+	// config-pinned hash is not ours to rewrite.
+	if needsUpgrade && !s.passwordIsPinned() {
 		if upgraded, err := hashPassword(req.Password); err != nil {
 			s.logger.Error("re-hashing legacy password", "error", err)
 		} else if err := s.db.SetPasswordHash(upgraded); err != nil {
@@ -511,7 +547,31 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on")
 }
 
+// passwordHash returns the authoritative admin password hash.
+//
+// A hash pinned in the configuration file wins over the database, so an
+// immutable deployment with an ephemeral database does not present a
+// first-run setup screen — and a window in which anyone could claim it —
+// on every restart.
+func (s *Server) passwordHash() (string, error) {
+	if pinned := strings.TrimSpace(s.cfg.Canarium.Auth.PasswordHash); pinned != "" {
+		return pinned, nil
+	}
+	return s.db.GetPasswordHash()
+}
+
+func (s *Server) passwordIsPinned() bool {
+	return strings.TrimSpace(s.cfg.Canarium.Auth.PasswordHash) != ""
+}
+
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if s.passwordIsPinned() {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "the admin password is set in the configuration file",
+		})
+		return
+	}
+
 	existing, err := s.db.GetPasswordHash()
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
@@ -579,7 +639,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // abort a sequence.
 func (s *Server) requireScope(required string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		storedHash, err := s.db.GetPasswordHash()
+		storedHash, err := s.passwordHash()
 		if err != nil {
 			s.logger.Error("reading password hash", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -677,7 +737,7 @@ func bearerToken(r *http.Request) string {
 // It reveals only whether a password exists, which is not sensitive and is
 // already implied by the behaviour of every other endpoint.
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	storedHash, err := s.db.GetPasswordHash()
+	storedHash, err := s.passwordHash()
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -697,6 +757,8 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"authenticated":       authenticated,
 		"scope":               scope,
 		"min_password_length": MinPasswordLength,
+		"password_pinned":     s.passwordIsPinned(),
+		"config_readonly":     s.cfg.Canarium.ConfigReadonly,
 	})
 }
 

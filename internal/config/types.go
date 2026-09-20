@@ -64,17 +64,47 @@ type WOLTransportConfig struct {
 }
 
 type CanariumConfig struct {
-	Mode           string             `yaml:"mode"`
-	Host           string             `yaml:"host"`
-	DataDir        string             `yaml:"data_dir"`
-	JournalRetain  string             `yaml:"journal_retain"`
-	ConfigReadonly bool               `yaml:"config_readonly"`
-	Auth           AuthConfig         `yaml:"auth"`
-	Notifications  NotificationConfig `yaml:"notifications"`
+	// Mode is the operating mode at startup: disarmed, dry-run or armed.
+	Mode string `yaml:"mode"`
+
+	// Host is the address the API listens on.
+	Host string `yaml:"host"`
+
+	// DataDir holds the state database and learned SSH host keys.
+	DataDir string `yaml:"data_dir"`
+
+	// JournalRetain is how long finished sequences are kept. Zero disables
+	// pruning.
+	JournalRetain string `yaml:"journal_retain"`
+
+	// ConfigReadonly makes the configuration file authoritative for
+	// settings it declares, refusing runtime changes to them through the
+	// API.
+	//
+	// Intended for GitOps-style deployments where the file in version
+	// control is the source of truth and a mode change made through the web
+	// UI would be silently reverted by the next deploy — the kind of drift
+	// that is only discovered during an outage.
+	ConfigReadonly bool `yaml:"config_readonly"`
+
+	Auth          AuthConfig         `yaml:"auth"`
+	Notifications NotificationConfig `yaml:"notifications"`
 }
 
 // AuthConfig controls how the API authenticates callers.
 type AuthConfig struct {
+	// PasswordHash pins the admin password from the configuration file
+	// rather than the database.
+	//
+	// When set, it takes precedence over any stored hash and the first-run
+	// setup endpoint is disabled — the password is whatever the file says.
+	// Intended for immutable deployments where the container's database is
+	// ephemeral and a first-run setup screen on every restart would be both
+	// an annoyance and a window of exposure.
+	//
+	// Generate one with: canarium hash-password
+	PasswordHash string `yaml:"password_hash,omitempty"`
+
 	// TrustProxyHeaders makes the server believe X-Forwarded-Proto and
 	// X-Forwarded-Ssl when deciding whether to mark the session cookie
 	// Secure. Enable this only when Canarium is reachable exclusively

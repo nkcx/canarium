@@ -55,6 +55,7 @@ func Validate(cfg *Config) *ValidationResult {
 func ValidateWith(cfg *Config, reg *Registry) *ValidationResult {
 	result := &ValidationResult{}
 
+	validateCanarium(cfg, result)
 	validateClients(cfg, result, reg)
 	validateSources(cfg, result, reg)
 	validatePlans(cfg, result, reg)
@@ -99,6 +100,54 @@ func validateSources(cfg *Config, result *ValidationResult, reg *Registry) {
 			if _, err := ParseDuration(s.PollInterval); err != nil {
 				result.AddError("%s: invalid poll_interval: %s", context, err)
 			}
+		}
+	}
+}
+
+// validateCanarium checks the top-level daemon settings.
+func validateCanarium(cfg *Config, result *ValidationResult) {
+	switch strings.ToLower(strings.TrimSpace(cfg.Canarium.Mode)) {
+	case "disarmed", "dry-run", "dryrun", "dry_run", "armed":
+	default:
+		// ParseMode falls back to disarmed, so an unrecognised value would
+		// otherwise produce a system that silently never acts.
+		result.AddError("canarium.mode is %q (expected disarmed, dry-run or armed)",
+			cfg.Canarium.Mode)
+	}
+
+	if cfg.Canarium.Host == "" {
+		result.AddError("canarium.host is empty")
+	}
+	if cfg.Canarium.DataDir == "" {
+		result.AddError("canarium.data_dir is empty")
+	}
+
+	if cfg.Canarium.JournalRetain != "" {
+		if d, err := ParseDuration(cfg.Canarium.JournalRetain); err != nil {
+			result.AddError("canarium.journal_retain: %s", err)
+		} else if d == 0 {
+			result.AddWarning("canarium.journal_retain is zero; " +
+				"sequence history will be kept indefinitely")
+		}
+	}
+
+	if hash := strings.TrimSpace(cfg.Canarium.Auth.PasswordHash); hash != "" {
+		if !strings.HasPrefix(hash, "$2") {
+			result.AddError("canarium.auth.password_hash is not a bcrypt hash; " +
+				"generate one with `canarium hash-password`")
+		}
+		result.AddInfo("canarium.auth.password_hash is set; the admin password " +
+			"comes from this file and first-run setup is disabled")
+	}
+
+	if cfg.Canarium.ConfigReadonly {
+		result.AddInfo("canarium.config_readonly is set; the API will refuse " +
+			"runtime changes to settings this file declares")
+	}
+
+	for i, wh := range cfg.Canarium.Notifications.Webhooks {
+		if strings.TrimSpace(wh.URL) == "" {
+			result.AddError("canarium.notifications.webhooks[%d] has no url", i)
 		}
 	}
 }

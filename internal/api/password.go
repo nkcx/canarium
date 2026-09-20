@@ -29,6 +29,12 @@ var bcryptCost = productionBcryptCost
 // MinPasswordLength is the shortest admin password accepted at setup.
 const MinPasswordLength = 12
 
+// HashPassword derives a bcrypt hash suitable for storage or for pinning in
+// a configuration file. Exported for `canarium hash-password`.
+func HashPassword(password string) (string, error) {
+	return hashPassword(password)
+}
+
 // hashPassword derives a bcrypt hash suitable for storage.
 func hashPassword(password string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword(bcryptPrehash(password), bcryptCost)
