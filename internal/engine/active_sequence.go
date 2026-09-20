@@ -160,6 +160,15 @@ func (a *ActiveSequence) CrossPonr() bool {
 	return true
 }
 
+// ResolvedAddr returns the address pinned for a client when the sequence
+// started.
+func (a *ActiveSequence) ResolvedAddr(client string) (state.ResolvedAddr, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	addr, ok := a.seq.ResolvedAddrs[client]
+	return addr, ok
+}
+
 // PreSequenceState returns a client's state as recorded when the sequence
 // began, used by the retain_state wake policy.
 func (a *ActiveSequence) PreSequenceState(client string) (string, bool) {
@@ -206,6 +215,10 @@ func (a *ActiveSequence) persistable() *state.Sequence {
 	cp.PreSequenceState = make(map[string]string, len(a.seq.PreSequenceState))
 	for k, v := range a.seq.PreSequenceState {
 		cp.PreSequenceState[k] = v
+	}
+	cp.ResolvedAddrs = make(map[string]state.ResolvedAddr, len(a.seq.ResolvedAddrs))
+	for k, v := range a.seq.ResolvedAddrs {
+		cp.ResolvedAddrs[k] = v
 	}
 	if a.seq.CompletedAt != nil {
 		completed := *a.seq.CompletedAt

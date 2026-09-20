@@ -21,12 +21,22 @@ func (e *Executor) executeSequence(plan *config.PlanConfig) {
 	}
 
 	seq := &state.Sequence{
-		ID:               fmt.Sprintf("seq_%d", now.UnixNano()),
-		PlanName:         plan.Name,
-		State:            SeqStateShuttingDown,
-		CurrentStage:     0,
-		StartedAt:        now,
+		ID:           fmt.Sprintf("seq_%d", now.UnixNano()),
+		PlanName:     plan.Name,
+		State:        SeqStateShuttingDown,
+		CurrentStage: 0,
+		StartedAt:    now,
+
 		PreSequenceState: preState,
+
+		// Pin addresses now, while the network is still whole. A power event
+		// often takes out the DNS server too, and by wake time the names in
+		// the config may no longer resolve.
+		ResolvedAddrs: e.resolveClientAddresses(e.ctx),
+
+		// Record the configuration in effect, so the journal says what the
+		// daemon was actually running when it acted.
+		ConfigSnapshot: e.configSnapshot(),
 	}
 
 	as := newActiveSequence(seq, plan)
@@ -406,7 +416,7 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 		return finish(StateDown, "")
 	}
 
-	client := e.buildClient(clientCfg)
+	client := e.buildClientFor(as, clientCfg)
 
 	ctx, cancel := context.WithTimeout(e.ctx, budget)
 	defer cancel()
@@ -668,7 +678,7 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 		probeInterval = config.DefaultProbeInterval()
 	}
 
-	client := e.buildClient(clientCfg)
+	client := e.buildClientFor(as, clientCfg)
 	probeTransport, hasProbe := e.transports[clientCfg.Transport]
 
 	for attempt := 0; attempt <= retries; attempt++ {

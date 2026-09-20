@@ -10,6 +10,7 @@ import (
 	"github.com/nkcx/canarium/internal/config"
 	"github.com/nkcx/canarium/internal/facts"
 	"github.com/nkcx/canarium/internal/state"
+	"gopkg.in/yaml.v3"
 )
 
 // Timings groups the executor's polling intervals.
@@ -522,7 +523,50 @@ func (e *Executor) findClientConfig(name string) *config.ClientConfig {
 	return nil
 }
 
+// configSnapshot serialises the running configuration.
+//
+// The sequences table has carried a config_snapshot column since the first
+// schema and nothing ever wrote to it. Recording it means the journal says
+// what the daemon was actually running when it acted, which is the first
+// question asked after an outage behaves unexpectedly — and the config file
+// on disk may well have been edited since.
+func (e *Executor) configSnapshot() []byte {
+	snapshot, err := yaml.Marshal(e.cfg)
+	if err != nil {
+		e.logger.Error("serialising config snapshot", "error", err)
+		return nil
+	}
+	return snapshot
+}
+
+// buildClientFor builds a transport client, using the address pinned when
+// the sequence started.
+func (e *Executor) buildClientFor(as *ActiveSequence, c *config.ClientConfig) *Client {
+	client := e.buildClient(c)
+	client.Address = e.addressFor(as, c)
+	return client
+}
+
 func (e *Executor) buildClient(c *config.ClientConfig) *Client {
+	// Every field the transports read is populated here. FeedPolicy,
+	// WakePolicy, ShutdownBudget, GuardPeriod, DependsOn, After and Before
+	// existed on this struct and were never set, so a transport reading any
+	// of them saw a zero value.
+	shutdownBudget := e.duration(c.ShutdownBudget, config.DefaultShutdownBudget(),
+		"shutdown_budget", "client", c.Name)
+	guardPeriod := e.duration(c.GuardPeriod, config.DefaultGuardPeriod(),
+		"guard_period", "client", c.Name)
+
+	feedPolicy := FeedPolicyAny
+	if c.FeedPolicy == "all" {
+		feedPolicy = FeedPolicyAll
+	}
+
+	wakePolicy := WakePolicyPowerState
+	if c.WakePolicy == "retain_state" {
+		wakePolicy = WakePolicyRetainState
+	}
+
 	client := &Client{
 		Name:            c.Name,
 		Description:     c.Description,
@@ -532,6 +576,13 @@ func (e *Executor) buildClient(c *config.ClientConfig) *Client {
 		Credentials:     c.Credentials,
 		Tags:            c.Tags,
 		Feeds:           c.Feeds,
+		FeedPolicy:      feedPolicy,
+		WakePolicy:      wakePolicy,
+		ShutdownBudget:  shutdownBudget,
+		GuardPeriod:     guardPeriod,
+		DependsOn:       c.DependsOn,
+		After:           c.After,
+		Before:          c.Before,
 		TransportConfig: c.Config,
 	}
 
