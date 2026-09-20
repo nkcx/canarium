@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	// Pure-Go SQLite driver: no cgo, so the binary cross-compiles to every
+	// target in the Makefile dist set and links statically.
+	_ "modernc.org/sqlite"
 )
 
 type DB struct {
@@ -21,7 +24,13 @@ func Open(dataDir string) (*DB, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "state.db")
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	dsn := dbPath + "?" + strings.Join([]string{
+		"_pragma=journal_mode(WAL)",
+		"_pragma=synchronous(NORMAL)",
+		"_pragma=busy_timeout(5000)",
+		"_pragma=foreign_keys(ON)",
+	}, "&")
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
