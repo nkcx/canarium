@@ -191,23 +191,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	seq := s.executor.GetActiveSequence()
+	// Snapshot() reads the whole sequence under one lock acquisition, so the
+	// response can never show a half-updated state. Reading the fields
+	// individually raced with the executor goroutine writing them.
 	var seqData any
-	if seq != nil {
-		seqData = map[string]any{
-			"id":            seq.Sequence.ID,
-			"plan":          seq.Sequence.PlanName,
-			"state":         seq.Sequence.State,
-			"current_stage": seq.Sequence.CurrentStage,
-			"ponr_crossed":  seq.Sequence.PonrCrossed,
-			"started_at":    seq.Sequence.StartedAt,
-		}
+	if seq := s.executor.ActiveSequence(); seq != nil {
+		seqData = seq.Snapshot()
+	}
+
+	clientStates := s.executor.GetAllClientStates()
+	clients := make(map[string]string, len(clientStates))
+	for name, st := range clientStates {
+		clients[name] = st.String()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":     s.executor.Mode().String(),
 		"sequence": seqData,
-		"clients":  s.executor.GetAllClientStates(),
+		"clients":  clients,
 	})
 }
 
@@ -274,12 +275,12 @@ func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSequence(w http.ResponseWriter, r *http.Request) {
-	seq := s.executor.GetActiveSequence()
+	seq := s.executor.ActiveSequence()
 	if seq == nil {
 		writeJSON(w, http.StatusOK, nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, seq.Sequence)
+	writeJSON(w, http.StatusOK, seq.Snapshot())
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
@@ -299,11 +300,26 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
-	if err := s.executor.AbortSequence(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	// A body is optional; an empty one just means no reason was given.
+	_ = json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req)
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "requested via API"
+	}
+
+	if err := s.executor.AbortSequence(reason); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
+
+	s.logger.Info("abort requested via API",
+		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "abort requested"})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

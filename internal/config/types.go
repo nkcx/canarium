@@ -100,11 +100,29 @@ type ShutdownConfig struct {
 	Stages       []StageConfig       `yaml:"stages"`
 }
 
+// PostShutdownConfig describes an action taken once every stage has
+// completed, typically instructing the UPS to cut its outlets so it does not
+// drain the battery powering nothing.
 type PostShutdownConfig struct {
 	Action  string `yaml:"action"`
 	Command string `yaml:"command"`
 	Delay   int    `yaml:"delay"`
-	UPS     string `yaml:"ups,omitempty"`
+
+	// UPS is the NUT UPS name to command, as it appears in ups.conf.
+	UPS string `yaml:"ups,omitempty"`
+
+	// Host is the NUT server to connect to. Defaults to localhost.
+	//
+	// This is distinct from UPS: the executor previously passed the UPS name
+	// as the connection address, so post-shutdown tried to resolve "ups" as
+	// a hostname and could never reach the server.
+	Host string `yaml:"host,omitempty"`
+	Port int    `yaml:"port,omitempty"`
+
+	// Credentials for the NUT server. Instant commands such as
+	// shutdown.return always require authentication.
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
 }
 
 type StageConfig struct {

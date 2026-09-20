@@ -3,6 +3,7 @@ package state
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func (d *DB) GetActiveSequence() (*Sequence, error) {
 
 	err := row.Scan(&seq.ID, &seq.PlanName, &seq.State, &seq.CurrentStage, &seq.PonrCrossed,
 		&startedAt, &completedAt, &configSnapshot, &preState, &resolved)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -123,7 +124,7 @@ func (d *DB) SaveClientState(name, state string, sequenceID *string) error {
 func (d *DB) GetClientState(name string) (string, error) {
 	var state string
 	err := d.db.QueryRow("SELECT state FROM client_states WHERE client_name = ?", name).Scan(&state)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "unknown", nil
 	}
 	return state, err
@@ -205,17 +206,47 @@ func (d *DB) GetCompletedStages(sequenceID string) ([]int, error) {
 	return stages, rows.Err()
 }
 
+// AcquireClientLock claims exclusive control of a client for a sequence.
+//
+// The lock is re-entrant for the sequence that already holds it. Without
+// that, a sequence resuming after a restart could not reclaim its own locks:
+// the rows survive the crash, the insert conflicts, and every client is
+// skipped with "locked by another sequence" — so a resumed sequence would
+// silently shut nothing down.
+//
+// Returns false only when a *different* sequence holds the lock.
 func (d *DB) AcquireClientLock(clientName, sequenceID string) (bool, error) {
-	result, err := d.db.Exec(`
+	res, err := d.db.Exec(`
 		INSERT INTO client_locks (client_name, sequence_id, locked_at)
 		VALUES (?, ?, ?)
-		ON CONFLICT(client_name) DO NOTHING
+		ON CONFLICT(client_name) DO UPDATE SET
+			locked_at = excluded.locked_at
+		WHERE client_locks.sequence_id = excluded.sequence_id
 	`, clientName, sequenceID, time.Now().Format(time.RFC3339Nano))
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("acquiring client lock: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("checking client lock: %w", err)
+	}
 	return rows > 0, nil
+}
+
+// ClientLockHolder returns the sequence holding a client's lock, or "" if it
+// is unlocked.
+func (d *DB) ClientLockHolder(clientName string) (string, error) {
+	var seqID string
+	err := d.db.QueryRow(
+		"SELECT sequence_id FROM client_locks WHERE client_name = ?", clientName).Scan(&seqID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading client lock: %w", err)
+	}
+	return seqID, nil
 }
 
 func (d *DB) ReleaseClientLock(clientName string) error {
@@ -239,7 +270,7 @@ func (d *DB) SetKV(key, value string) error {
 func (d *DB) GetKV(key string) (string, error) {
 	var value string
 	err := d.db.QueryRow("SELECT value FROM kv WHERE key = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, err
@@ -256,7 +287,7 @@ func (d *DB) SetPasswordHash(hash string) error {
 func (d *DB) GetPasswordHash() (string, error) {
 	var hash string
 	err := d.db.QueryRow("SELECT password_hash FROM auth WHERE id = 1").Scan(&hash)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return hash, err
@@ -273,7 +304,7 @@ func (d *DB) SaveAPIToken(tokenHash, name, scope string) error {
 func (d *DB) ValidateAPIToken(tokenHash string) (string, error) {
 	var scope string
 	err := d.db.QueryRow("SELECT scope FROM api_tokens WHERE token_hash = ?", tokenHash).Scan(&scope)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return scope, err
