@@ -77,6 +77,12 @@ type Executor struct {
 	clientStates   map[string]ClientState
 	listeners      []EventListener
 
+	// upsSourcesOnce guards the cached list of UPS-reporting source
+	// instances, which is derived from the store's declarations and does not
+	// change after startup.
+	upsSourcesOnce   sync.Once
+	cachedUPSSources []string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -241,6 +247,9 @@ func (e *Executor) saveSequence(as *ActiveSequence) {
 func (e *Executor) Start() error {
 	e.logger.Info("executor starting", "mode", e.mode)
 
+	e.registerDerivedFacts()
+	e.updateDerivedFacts(time.Now())
+
 	if err := e.restoreState(); err != nil {
 		e.logger.Error("failed to restore state", "error", err)
 	}
@@ -364,16 +373,28 @@ func (e *Executor) qualityLoop() {
 	ticker := time.NewTicker(e.timings.QualityRefresh)
 	defer ticker.Stop()
 
-	e.store.RefreshQuality(time.Now())
+	e.refreshFacts()
 
 	for {
 		select {
 		case <-e.ctx.Done():
 			return
 		case <-ticker.C:
-			e.store.RefreshQuality(time.Now())
+			e.refreshFacts()
 		}
 	}
+}
+
+// refreshFacts recomputes fact freshness and Canarium's own derived facts.
+func (e *Executor) refreshFacts() {
+	now := time.Now()
+	e.store.RefreshQuality(now)
+
+	// Derived facts read the freshness computed above, so the order matters:
+	// a client fed by a source that has just gone stale must be evaluated
+	// against that staleness, not the previous tick's.
+	e.updateDerivedFacts(now)
+	e.store.RefreshQuality(now)
 }
 
 func (e *Executor) policyLoop() {

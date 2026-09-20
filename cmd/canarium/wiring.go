@@ -240,6 +240,11 @@ func buildRegistry(cfg *config.Config, store *facts.Store, logger *slog.Logger) 
 	}
 	sort.Strings(factKeys)
 
+	// Conditions may reference facts Canarium derives itself, which have no
+	// source declaring them.
+	factKeys = append(factKeys, engine.DerivedFactKeys(cfg)...)
+	sort.Strings(factKeys)
+
 	return &config.Registry{
 		Transports:  transportNames(cfg, logger),
 		SourceTypes: sourceTypes(),
