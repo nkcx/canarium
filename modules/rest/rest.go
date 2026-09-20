@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/netutil"
 )
 
 type Transport struct {
@@ -95,7 +96,7 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		if port == 0 {
 			port = 80
 		}
-		url = fmt.Sprintf("http://%s:%d/", client.Address, port)
+		url = netutil.URL("http", client.Address, port, "/")
 	}
 
 	url = expandVars(url, client)

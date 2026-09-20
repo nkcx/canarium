@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/netutil"
 )
 
 type Transport struct {
@@ -70,7 +71,7 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		timeout = 5 * time.Second
 	}
 
-	addr := fmt.Sprintf("%s:%d", client.Address, port)
+	addr := netutil.HostPort(client.Address, port)
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return engine.StateDown, nil
@@ -85,7 +86,7 @@ func (t *Transport) connect(client *engine.Client) (*websocket.Conn, error) {
 		port = p
 	}
 
-	url := fmt.Sprintf("wss://%s:%d/api/current", client.Address, port)
+	url := netutil.URL("wss", client.Address, port, "/api/current")
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -93,7 +94,7 @@ func (t *Transport) connect(client *engine.Client) (*websocket.Conn, error) {
 
 	conn, _, err := dialer.Dial(url, nil)
 	if err != nil {
-		url = fmt.Sprintf("ws://%s:%d/api/current", client.Address, port)
+		url = netutil.URL("ws", client.Address, port, "/api/current")
 		conn, _, err = dialer.Dial(url, nil)
 		if err != nil {
 			return nil, err

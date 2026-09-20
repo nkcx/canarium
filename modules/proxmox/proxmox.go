@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/netutil"
 )
 
 type Transport struct {
@@ -53,7 +54,7 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		port = p
 	}
 
-	apiURL := fmt.Sprintf("https://%s:%d/api2/json/nodes/%s/status", client.Address, port, node)
+	apiURL := netutil.URL("https", client.Address, port, "/api2/json/nodes/"+url.PathEscape(node)+"/status")
 
 	data := url.Values{}
 	data.Set("command", "shutdown")
@@ -98,7 +99,7 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		timeout = 5 * time.Second
 	}
 
-	addr := fmt.Sprintf("%s:%d", client.Address, port)
+	addr := netutil.HostPort(client.Address, port)
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return engine.StateDown, nil

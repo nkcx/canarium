@@ -12,7 +12,11 @@ import (
 
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
+	"github.com/nkcx/canarium/internal/netutil"
 )
+
+// defaultNUTPort is the IANA-registered port for the NUT network protocol.
+const defaultNUTPort = 3493
 
 type Source struct {
 	instances []InstanceConfig
@@ -111,7 +115,7 @@ func (s *Source) fetchAndUpdate(inst InstanceConfig, updates chan<- engine.FactU
 	}
 	port := inst.Port
 	if port == 0 {
-		port = 3493
+		port = defaultNUTPort
 	}
 	ups := inst.UPS
 	if ups == "" {
@@ -161,7 +165,7 @@ func (s *Source) fetchAndUpdate(inst InstanceConfig, updates chan<- engine.FactU
 }
 
 func (s *Source) queryUPS(host string, port int, ups string) (map[string]string, error) {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := netutil.HostPort(host, port)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NUT: %w", err)
@@ -249,7 +253,7 @@ func (t *NUTTransport) Execute(ctx context.Context, client *engine.Client, actio
 		host = "localhost"
 	}
 
-	addr := fmt.Sprintf("%s:3493", host)
+	addr := netutil.HostPort(host, defaultNUTPort)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NUT: %w", err)

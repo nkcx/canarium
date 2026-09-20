@@ -12,6 +12,7 @@ import (
 	"github.com/gosnmp/gosnmp"
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
+	"github.com/nkcx/canarium/internal/netutil"
 )
 
 // pethPsePortAdminEnable OID from RFC 3621 POWER-ETHERNET-MIB.
@@ -252,7 +253,7 @@ func (t *PoeTransport) Probe(ctx context.Context, client *engine.Client) (engine
 		timeout = 5 * time.Second
 	}
 
-	addr := fmt.Sprintf("%s:%d", client.Address, port)
+	addr := netutil.HostPort(client.Address, port)
 	conn, err := net.DialTimeout("udp", addr, timeout)
 	if err != nil {
 		return engine.StateDown, nil

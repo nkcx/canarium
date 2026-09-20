@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/netutil"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -96,7 +97,7 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		timeout = 5 * time.Second
 	}
 
-	addr := fmt.Sprintf("%s:%d", client.Address, port)
+	addr := netutil.HostPort(client.Address, port)
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return engine.StateDown, nil
@@ -131,7 +132,7 @@ func (t *Transport) connect(ctx context.Context, client *engine.Client) (*gossh.
 	if client.ProbeConfig.Port != 0 {
 		port = client.ProbeConfig.Port
 	}
-	addr := fmt.Sprintf("%s:%d", client.Address, port)
+	addr := netutil.HostPort(client.Address, port)
 
 	return gossh.Dial("tcp", addr, config)
 }
