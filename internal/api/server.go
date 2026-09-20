@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,11 @@ const (
 
 	// sessionReapInterval is how often expired sessions are pruned.
 	sessionReapInterval = 1 * time.Hour
+
+	// maxRequestBody caps how much of a request body is read. Every API
+	// request carries at most a small JSON object; without a cap an
+	// unauthenticated client could stream an unbounded body at the decoder.
+	maxRequestBody = 64 << 10
 )
 
 type Server struct {
@@ -48,6 +55,9 @@ type Server struct {
 
 	wsMu      sync.RWMutex
 	wsClients map[*wsClient]bool
+
+	// loginLimiter throttles repeated failed logins per source address.
+	loginLimiter *failureLimiter
 
 	// ctx is cancelled by Stop and bounds the server's background
 	// goroutines.
@@ -73,8 +83,10 @@ func NewServer(
 		webFS:     webFS,
 		mux:       http.NewServeMux(),
 		wsClients: make(map[*wsClient]bool),
-		ctx:       ctx,
-		cancel:    cancel,
+		loginLimiter: newFailureLimiter(
+			maxLoginFailures, failureWindow, lockoutDuration),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	s.routes()
@@ -273,7 +285,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mode string `json:"mode"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
@@ -294,25 +306,59 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	source := clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders)
+
+	if allowed, retryAfter := s.loginLimiter.Allow(source); !allowed {
+		s.logger.Warn("login attempt refused; source is locked out",
+			"source", source, "retry_after", retryAfter.Round(time.Second))
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "too many failed attempts; try again later",
+		})
+		return
+	}
+
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
 	storedHash, err := s.db.GetPasswordHash()
-	if err != nil || storedHash == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no password set"})
+	if err != nil {
+		s.logger.Error("reading password hash", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if storedHash == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error":          "setup required",
+			"setup_required": true,
+		})
 		return
 	}
 
 	valid, needsUpgrade := verifyPassword(storedHash, req.Password)
 	if !valid {
+		s.loginLimiter.RecordFailure(source)
+		s.logger.Warn("failed login attempt", "source", source)
+
+		// Slow every rejection slightly. This costs a human who mistyped
+		// their password nothing and meaningfully bounds an attacker who
+		// spreads guesses across source addresses to evade the per-source
+		// threshold.
+		select {
+		case <-time.After(loginFailureDelay):
+		case <-r.Context().Done():
+		}
+
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 		return
 	}
+
+	s.loginLimiter.Reset(source)
 
 	// Transparently migrate a legacy unsalted SHA-256 hash to bcrypt now that
 	// we hold the plaintext. A failure here must not block the login.
@@ -412,7 +458,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}

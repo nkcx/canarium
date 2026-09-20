@@ -20,6 +20,13 @@ import (
 // legacy upgrade path all behave identically at any cost.
 func TestMain(m *testing.M) {
 	bcryptCost = bcrypt.MinCost
+
+	// The handler deliberately sleeps on every rejected login. Across the
+	// suite's many negative auth cases that adds tens of seconds of pure
+	// waiting; the throttling behaviour itself is covered by
+	// failureLimiter's own tests, which use an injectable clock.
+	loginFailureDelay = 0
+
 	os.Exit(m.Run())
 }
 
