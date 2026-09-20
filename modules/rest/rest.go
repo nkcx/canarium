@@ -70,23 +70,50 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
-		return &engine.ActionResult{Success: false, Message: err.Error()}, nil
+		// Go embeds the full request URL in transport errors, and
+		// expandVars may have substituted a credential into it. This message
+		// is persisted to the intents table, broadcast over the WebSocket and
+		// POSTed to notification webhooks.
+		return &engine.ActionResult{
+			Success: false,
+			Message: sanitise(err.Error(), client),
+		}, nil
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return &engine.ActionResult{
-			Success: true,
-			Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody)),
-		}, nil
-	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 
 	return &engine.ActionResult{
-		Success: false,
-		Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody)),
+		Success: resp.StatusCode >= 200 && resp.StatusCode < 300,
+		Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode,
+			sanitise(strings.TrimSpace(string(respBody)), client)),
 	}, nil
+}
+
+// maxResponseBody caps how much of a response is captured into a result
+// message, which is persisted and broadcast.
+const maxResponseBody = 4096
+
+// sanitise removes anything credential-shaped from a message that will be
+// persisted, logged or sent to a webhook.
+func sanitise(msg string, client *engine.Client) string {
+	msg = netutil.RedactSecrets(msg, client.Credentials)
+
+	// Transport errors quote the URL; redact any credential-bearing query
+	// parameters that survived.
+	for _, field := range urlFields {
+		if raw := getConfigString(client.TransportConfig, field); raw != "" {
+			expanded := expandVars(raw, client)
+			msg = strings.ReplaceAll(msg, expanded, netutil.RedactURL(expanded))
+		}
+	}
+	return msg
+}
+
+// urlFields are the transport_config keys that hold URLs.
+var urlFields = []string{
+	"shutdown_url", "wake_url", "probe_url",
+	"poe_off_url", "poe_on_url", "outlet_off_url", "outlet_on_url",
 }
 
 func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.ClientState, error) {
@@ -113,7 +140,8 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		if netutil.ClassifyDialError(err) == netutil.Unreachable {
 			return engine.StateDown, nil
 		}
-		return engine.StateUnknown, fmt.Errorf("probing %s: %w", netutil.RedactURL(url), err)
+		return engine.StateUnknown, fmt.Errorf("probing %s: %s",
+			netutil.RedactURL(url), sanitise(err.Error(), client))
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

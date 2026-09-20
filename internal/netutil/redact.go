@@ -65,6 +65,30 @@ func isSensitiveKey(key string) bool {
 	return false
 }
 
+// RedactEndpoint reduces a URL to scheme and host, eliding the path.
+//
+// Use this for notification endpoints. RedactURL only removes userinfo and
+// credential-shaped query parameters, but the dominant webhook providers put
+// the secret in the *path*:
+//
+//	https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXX
+//	https://discord.com/api/webhooks/123456789/XXXXXXXXXXXXXXXX
+//
+// For those, the entire path is the credential, so identifying the endpoint
+// by host alone is the only safe rendering that is still useful in a log.
+func RedactEndpoint(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return redactedPlaceholder
+	}
+
+	out := u.Scheme + "://" + u.Host
+	if u.Path != "" && u.Path != "/" {
+		out += "/" + redactedPlaceholder
+	}
+	return out
+}
+
 // RedactSecrets removes every occurrence of the given secrets from s.
 //
 // Used for error strings that may embed a credential somewhere structured

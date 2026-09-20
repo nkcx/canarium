@@ -220,6 +220,9 @@ func runDaemon(configPath string) error {
 	if len(cfg.Canarium.Notifications.Webhooks) > 0 {
 		notifier := notify.NewWebhookNotifier(cfg.Canarium.Notifications.Webhooks, logger)
 		executor.AddListener(notifier.HandleEvent)
+		// Drain queued notifications before exiting, so the last events of a
+		// sequence are not lost on shutdown.
+		defer notifier.Close()
 	}
 
 	server := api.NewServer(cfg, store, executor, db, canarium.WebFS, logger)
