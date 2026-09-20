@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -18,21 +19,26 @@ import (
 	"github.com/nkcx/canarium/internal/notify"
 	"github.com/nkcx/canarium/internal/simulate"
 	"github.com/nkcx/canarium/internal/state"
-	execmod "github.com/nkcx/canarium/modules/exec"
-	nutmod "github.com/nkcx/canarium/modules/nut"
-	"github.com/nkcx/canarium/modules/opnsense"
-	"github.com/nkcx/canarium/modules/proxmox"
-	restmod "github.com/nkcx/canarium/modules/rest"
-	snmpmod "github.com/nkcx/canarium/modules/snmp"
-	"github.com/nkcx/canarium/modules/ssh"
-	"github.com/nkcx/canarium/modules/truenas"
-	"github.com/nkcx/canarium/modules/wol"
 	"github.com/spf13/cobra"
 )
 
 var version = "dev"
 
+// shutdownGrace is how long in-flight HTTP requests have to finish.
+const shutdownGrace = 10 * time.Second
+
+// newLogger builds the daemon's structured logger.
+func newLogger(w io.Writer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
+}
+
 func main() {
+	// The config package cannot import conditions (which imports config), so
+	// expression type-checking is injected here. Without this, ValidateExpr
+	// was never called and a malformed template was not a config error — it
+	// simply evaluated to unavailable forever and its condition never fired.
+	config.ExprValidator = conditions.ValidateExpr
+
 	root := &cobra.Command{
 		Use:     "canarium",
 		Short:   "Power-event orchestrator",
@@ -54,6 +60,59 @@ func main() {
 	}
 }
 
+// loadAndValidate loads a config and checks it against what this build
+// actually supports.
+//
+// Building a registry from the live transport and source tables means
+// validation cannot drift from the daemon: adding a transport makes it valid
+// in configs automatically, and removing one turns existing configs into
+// errors rather than silent runtime skips.
+func loadAndValidate(configPath string, logger *slog.Logger, opts config.LoadOptions) (*config.Config, *config.ValidationResult, error) {
+	loaded, err := config.LoadWith(configPath, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := loaded.Config
+
+	// Fact declarations come from the configured sources, so the store must
+	// be populated before fact references can be checked.
+	store := facts.NewStore()
+	if _, err := NewSourceManager(cfg, store, logger); err != nil {
+		// Report this as a validation error rather than a hard failure, so
+		// the operator sees every problem at once.
+		result := &config.ValidationResult{}
+		result.AddError("%s", err)
+		return cfg, result, nil
+	}
+
+	registry := buildRegistry(cfg, store, logger)
+	result := config.ValidateWith(cfg, registry)
+
+	for _, name := range loaded.MissingEnv {
+		result.AddWarning("environment variable %s is not set; "+
+			"a placeholder was substituted for validation. "+
+			"The daemon will refuse to start until it is set.", name)
+	}
+
+	return cfg, result, nil
+}
+
+// reportValidation prints a validation result and reports whether it failed.
+func reportValidation(result *config.ValidationResult, verbose bool) bool {
+	for _, e := range result.Errors {
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", e)
+	}
+	for _, w := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "WARN:  %s\n", w)
+	}
+	if verbose {
+		for _, i := range result.Info {
+			fmt.Fprintf(os.Stdout, "INFO:  %s\n", i)
+		}
+	}
+	return result.HasErrors()
+}
+
 func runCmd(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
@@ -65,37 +124,51 @@ func runCmd(configPath *string) *cobra.Command {
 }
 
 func validateCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var quiet bool
+	var strictEnv bool
+
+	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate configuration (offline, deterministic)",
+		Long: "Check a configuration file for errors without contacting anything.\n\n" +
+			"Verifies that transports and source types exist in this build, that every\n" +
+			"client and tag reference resolves, that fact references match what the\n" +
+			"configured sources declare, that template expressions type-check, that\n" +
+			"durations parse, and that stage ordering is consistent with declared\n" +
+			"dependencies. Exits non-zero on any error, so it is suitable for CI.",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			logger := newLogger(os.Stderr, slog.LevelWarn)
+
+			// Unset environment variables are a warning here, not an
+			// error: validating a config's structure in CI should not
+			// require production secrets. --strict-env opts into the
+			// daemon's behaviour.
+			_, result, err := loadAndValidate(*configPath, logger, config.LoadOptions{
+				AllowMissingEnv: !strictEnv,
+			})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading config: %s\n", err)
-				return err
+				return fmt.Errorf("loading config: %w", err)
 			}
 
-			result := config.Validate(cfg)
-
-			for _, e := range result.Errors {
-				fmt.Fprintf(os.Stderr, "ERROR: %s\n", e)
-			}
-			for _, w := range result.Warnings {
-				fmt.Fprintf(os.Stderr, "WARN:  %s\n", w)
-			}
-			for _, i := range result.Info {
-				fmt.Fprintf(os.Stdout, "INFO:  %s\n", i)
-			}
-
-			if result.HasErrors() {
+			if reportValidation(result, !quiet) {
 				fmt.Fprintf(os.Stderr, "\nValidation failed with %d error(s)\n", len(result.Errors))
 				return fmt.Errorf("validation failed")
 			}
 
-			fmt.Println("Configuration is valid.")
+			if len(result.Warnings) > 0 {
+				fmt.Printf("Configuration is valid (%d warning(s)).\n", len(result.Warnings))
+			} else {
+				fmt.Println("Configuration is valid.")
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress informational output")
+	cmd.Flags().BoolVar(&strictEnv, "strict-env", false,
+		"fail if any referenced environment variable is unset, as the daemon does")
+	return cmd
 }
 
 func doctorCmd(configPath *string) *cobra.Command {
@@ -174,21 +247,17 @@ func simulateCmd(configPath *string) *cobra.Command {
 }
 
 func runDaemon(configPath string) error {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	logger := newLogger(os.Stderr, slog.LevelInfo)
 
-	cfg, err := config.Load(configPath)
+	cfg, result, err := loadAndValidate(configPath, logger, config.LoadOptions{})
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-
-	result := config.Validate(cfg)
 	if result.HasErrors() {
 		for _, e := range result.Errors {
 			logger.Error("config error", "error", e)
 		}
-		return fmt.Errorf("config validation failed")
+		return fmt.Errorf("config validation failed with %d error(s)", len(result.Errors))
 	}
 	for _, w := range result.Warnings {
 		logger.Warn("config warning", "warning", w)
@@ -215,7 +284,19 @@ func runDaemon(configPath string) error {
 	executor := engine.NewExecutor(cfg, store, evaluator, db, logger)
 
 	registerTransports(executor, cfg, logger)
-	registerSources(store, cfg, logger, executor)
+
+	sources, err := NewSourceManager(cfg, store, logger)
+	if err != nil {
+		return fmt.Errorf("configuring sources: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := sources.Start(ctx, store); err != nil {
+		return fmt.Errorf("starting sources: %w", err)
+	}
+	defer sources.Stop()
 
 	if len(cfg.Canarium.Notifications.Webhooks) > 0 {
 		notifier := notify.NewWebhookNotifier(cfg.Canarium.Notifications.Webhooks, logger)
@@ -248,15 +329,17 @@ func runDaemon(configPath string) error {
 		"address", cfg.Canarium.Host,
 	)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	<-ctx.Done()
+	stop() // restore default signal handling, so a second signal kills us
 
 	logger.Info("shutting down")
 	executor.Stop()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
-	server.Stop(ctx)
+	if err := server.Stop(shutdownCtx); err != nil {
+		logger.Error("shutting down the API server", "error", err)
+	}
 
 	return nil
 }
@@ -275,135 +358,4 @@ func warnIfNoAdminPassword(db *state.DB, logger *slog.Logger) {
 		logger.Warn("no admin password is set; the API will reject all requests " +
 			"until one is created through the web UI's first-run screen")
 	}
-}
-
-func registerTransports(executor *engine.Executor, cfg *config.Config, logger *slog.Logger) {
-	executor.RegisterTransport("ssh", ssh.New(ssh.Config{
-		User:           cfg.Transports.SSH.User,
-		Port:           cfg.Transports.SSH.Port,
-		Command:        cfg.Transports.SSH.Command,
-		KeyPath:        cfg.Transports.SSH.KeyPath,
-		KeyPassphrase:  cfg.Transports.SSH.KeyPassphrase,
-		KnownHosts:     cfg.Transports.SSH.KnownHosts,
-		HostKeyPolicy:  cfg.Transports.SSH.HostKeyPolicy,
-		ConnectTimeout: cfg.Transports.SSH.ConnectTimeout,
-		CommandTimeout: cfg.Transports.SSH.CommandTimeout,
-	}, logger))
-	executor.RegisterTransport("wol", wol.New(wol.Config{
-		RepeatCount: cfg.Transports.WOL.RepeatCount,
-		RepeatDelay: cfg.Transports.WOL.RepeatDelay,
-		Port:        cfg.Transports.WOL.Port,
-	}, logger))
-	executor.RegisterTransport("exec", execmod.New())
-	executor.RegisterTransport("rest", restmod.New())
-	executor.RegisterTransport("proxmox", proxmox.New(logger))
-	executor.RegisterTransport("truenas", truenas.New(logger))
-	executor.RegisterTransport("opnsense", opnsense.New(logger))
-	executor.RegisterTransport("nut", nutmod.NewTransport(logger))
-	executor.RegisterTransport("snmp-poe", snmpmod.NewPoeTransport(logger))
-}
-
-func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger, executor *engine.Executor) {
-	for _, src := range cfg.Sources {
-		switch src.Type {
-		case "nut":
-			var instances []nutmod.InstanceConfig
-			if cfgData, ok := src.Config["instances"].([]any); ok {
-				for _, inst := range cfgData {
-					if m, ok := inst.(map[string]any); ok {
-						ic := nutmod.InstanceConfig{
-							Name:         getStr(m, "name"),
-							Host:         getStr(m, "host"),
-							UPS:          getStr(m, "ups"),
-							PollInterval: getStr(m, "poll_interval"),
-							// Previously omitted, so credentials in the
-							// config file were silently discarded.
-							Username: getStr(m, "username"),
-							Password: getStr(m, "password"),
-						}
-						if p, ok := m["port"].(int); ok {
-							ic.Port = p
-						}
-						instances = append(instances, ic)
-					}
-				}
-			}
-
-			nutCfg := nutmod.Config{Instances: instances}
-			nutmod.RegisterFacts(store, nutCfg, logger)
-
-			source := nutmod.NewSource(nutCfg, logger)
-			updates := make(chan engine.FactUpdate, 100)
-			go func() {
-				source.Start(context.Background(), updates)
-			}()
-			go func() {
-				for update := range updates {
-					store.Update(update.Key, update.Value, update.Timestamp)
-				}
-			}()
-
-		case "snmp":
-			var instances []snmpmod.InstanceConfig
-			if cfgData, ok := src.Config["instances"].([]any); ok {
-				for _, inst := range cfgData {
-					if m, ok := inst.(map[string]any); ok {
-						ic := snmpmod.InstanceConfig{
-							Name:         getStr(m, "name"),
-							Host:         getStr(m, "host"),
-							PollInterval: getStr(m, "poll_interval"),
-							Community:    getStr(m, "snmp_community"),
-							User:         getStr(m, "snmp_user"),
-							AuthPass:     getStr(m, "snmp_auth_pass"),
-							PrivPass:     getStr(m, "snmp_priv_pass"),
-						}
-						if p, ok := m["port"].(int); ok {
-							ic.Port = p
-						}
-						if v, ok := m["snmp_version"].(int); ok {
-							ic.Version = v
-						}
-						if oidData, ok := m["oids"].([]any); ok {
-							for _, oidItem := range oidData {
-								if om, ok := oidItem.(map[string]any); ok {
-									ic.OIDs = append(ic.OIDs, snmpmod.OIDSpec{
-										OID:  getStr(om, "oid"),
-										Name: getStr(om, "name"),
-										Type: getStr(om, "type"),
-									})
-								}
-							}
-						}
-						instances = append(instances, ic)
-					}
-				}
-			}
-
-			snmpCfg := snmpmod.Config{Instances: instances}
-			snmpmod.RegisterFacts(store, snmpCfg)
-
-			snmpSource := snmpmod.NewSource(snmpCfg, logger)
-			snmpUpdates := make(chan engine.FactUpdate, 100)
-			go func() {
-				snmpSource.Start(context.Background(), snmpUpdates)
-			}()
-			go func() {
-				for update := range snmpUpdates {
-					store.Update(update.Key, update.Value, update.Timestamp)
-				}
-			}()
-		}
-	}
-}
-
-func getStr(m map[string]any, key string) string {
-	v, ok := m[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
 }

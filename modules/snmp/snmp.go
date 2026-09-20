@@ -182,8 +182,8 @@ func (s *Source) fetchAndUpdate(inst InstanceConfig, updates chan<- engine.FactU
 
 // RegisterFacts pre-registers fact declarations with the store so conditions
 // can reference them before the first poll completes.
-func RegisterFacts(store *facts.Store, cfg Config) {
-	src := NewSource(cfg, slog.Default())
+func RegisterFacts(store *facts.Store, cfg Config, logger *slog.Logger) {
+	src := NewSource(cfg, logger)
 	for _, decl := range src.Declarations() {
 		var factDecls []facts.FactDeclaration
 		for _, f := range decl.Facts {

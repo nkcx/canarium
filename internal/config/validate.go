@@ -28,14 +28,79 @@ func (r *ValidationResult) AddInfo(format string, args ...any) {
 	r.Info = append(r.Info, fmt.Sprintf(format, args...))
 }
 
+// Registry describes what the running daemon actually supports, so
+// validation can check a config against reality rather than against a
+// hardcoded list that drifts.
+type Registry struct {
+	// Transports is the set of registered transport names.
+	Transports []string
+
+	// SourceTypes is the set of source types the daemon can construct.
+	SourceTypes []string
+
+	// Facts is the set of fact keys the configured sources declare. Empty
+	// means fact references are not checked.
+	Facts []string
+}
+
+// Validate checks a configuration for errors.
+//
+// Passing a nil registry skips the checks that need to know what the daemon
+// supports; `canarium validate` always supplies one.
 func Validate(cfg *Config) *ValidationResult {
+	return ValidateWith(cfg, nil)
+}
+
+// ValidateWith checks a configuration against what the daemon supports.
+func ValidateWith(cfg *Config, reg *Registry) *ValidationResult {
 	result := &ValidationResult{}
 
-	validateClients(cfg, result)
-	validatePlans(cfg, result)
+	validateClients(cfg, result, reg)
+	validateSources(cfg, result, reg)
+	validatePlans(cfg, result, reg)
 	validateDependencies(cfg, result)
 
 	return result
+}
+
+// validateSources checks the sources block.
+//
+// registerSources in the daemon has no default case: a source whose type it
+// does not recognise is skipped in silence, so a config declaring a GPIO
+// flood sensor would start cleanly and simply never produce the fact its
+// plans depend on.
+func validateSources(cfg *Config, result *ValidationResult, reg *Registry) {
+	names := make(map[string]bool)
+
+	for i, s := range cfg.Sources {
+		context := fmt.Sprintf("source %d", i)
+		if s.Name != "" {
+			context = fmt.Sprintf("source %q", s.Name)
+		}
+
+		if s.Name == "" {
+			result.AddError("%s: has no name", context)
+		} else if names[s.Name] {
+			result.AddError("duplicate source name: %s", s.Name)
+		}
+		names[s.Name] = true
+
+		if s.Type == "" {
+			result.AddError("%s: has no type", context)
+			continue
+		}
+
+		if reg != nil && len(reg.SourceTypes) > 0 && !slices.Contains(reg.SourceTypes, s.Type) {
+			result.AddError("%s: unknown source type %q (available: %s)",
+				context, s.Type, strings.Join(reg.SourceTypes, ", "))
+		}
+
+		if s.PollInterval != "" {
+			if _, err := ParseDuration(s.PollInterval); err != nil {
+				result.AddError("%s: invalid poll_interval: %s", context, err)
+			}
+		}
+	}
 }
 
 type clientDeps struct {
@@ -43,7 +108,7 @@ type clientDeps struct {
 	deps   []string
 }
 
-func validateClients(cfg *Config, result *ValidationResult) {
+func validateClients(cfg *Config, result *ValidationResult, reg *Registry) {
 	names := make(map[string]bool)
 	var deferredDeps []clientDeps
 	for _, c := range cfg.Clients {
@@ -56,8 +121,31 @@ func validateClients(cfg *Config, result *ValidationResult) {
 		}
 		names[c.Name] = true
 
+		// A transport name the daemon does not know is fatal, not cosmetic:
+		// at runtime shutdownClient logs "transport not found" and returns,
+		// so the host is simply never shut down while the sequence reports
+		// success and moves on.
 		if c.Transport == "" {
 			result.AddError("client %q has no transport", c.Name)
+		} else if reg != nil && len(reg.Transports) > 0 && !slices.Contains(reg.Transports, c.Transport) {
+			result.AddError("client %q: unknown transport %q (available: %s)",
+				c.Name, c.Transport, strings.Join(reg.Transports, ", "))
+		}
+
+		if c.Wake != nil && c.Wake.Transport != "" &&
+			reg != nil && len(reg.Transports) > 0 &&
+			!slices.Contains(reg.Transports, c.Wake.Transport) {
+			result.AddError("client %q: unknown wake transport %q (available: %s)",
+				c.Name, c.Wake.Transport, strings.Join(reg.Transports, ", "))
+		}
+
+		if c.CommsLossAssumes != "" {
+			switch c.CommsLossAssumes {
+			case CommsLossThreatened, CommsLossSafe:
+			default:
+				result.AddError("client %q: invalid comms_loss_assumes %q (must be %q or %q)",
+					c.Name, c.CommsLossAssumes, CommsLossThreatened, CommsLossSafe)
+			}
 		}
 
 		if _, err := ParseDuration(c.ShutdownBudget); err != nil {
@@ -93,7 +181,7 @@ func validateClients(cfg *Config, result *ValidationResult) {
 	}
 }
 
-func validatePlans(cfg *Config, result *ValidationResult) {
+func validatePlans(cfg *Config, result *ValidationResult, reg *Registry) {
 	planNames := make(map[string]bool)
 	clientNames := buildClientNameSet(cfg)
 	tagClients := buildTagMap(cfg)
@@ -108,9 +196,9 @@ func validatePlans(cfg *Config, result *ValidationResult) {
 		}
 		planNames[p.Name] = true
 
-		validateConditionConfig(&p.Trigger, fmt.Sprintf("plan %q trigger", p.Name), result)
+		validateConditionConfig(&p.Trigger, fmt.Sprintf("plan %q trigger", p.Name), result, reg)
 		if p.Abort != nil {
-			validateConditionConfig(p.Abort, fmt.Sprintf("plan %q abort", p.Name), result)
+			validateConditionConfig(p.Abort, fmt.Sprintf("plan %q abort", p.Name), result, reg)
 		}
 
 		hasPonr := false
@@ -119,7 +207,7 @@ func validatePlans(cfg *Config, result *ValidationResult) {
 				result.AddError("plan %q: stage %d has no name", p.Name, i)
 			}
 
-			validateConditionConfig(&s.When, fmt.Sprintf("plan %q stage %q when", p.Name, s.Name), result)
+			validateConditionConfig(&s.When, fmt.Sprintf("plan %q stage %q when", p.Name, s.Name), result, reg)
 
 			if s.Budget != "" {
 				if _, err := ParseDuration(s.Budget); err != nil {
@@ -170,7 +258,39 @@ func validatePlans(cfg *Config, result *ValidationResult) {
 			result.AddInfo("plan %q: no PONR set — sequence is fully abortable", p.Name)
 		}
 
-		validateConditionConfig(&p.Wake.Gate, fmt.Sprintf("plan %q wake gate", p.Name), result)
+		validateConditionConfig(&p.Wake.Gate, fmt.Sprintf("plan %q wake gate", p.Name), result, reg)
+
+		for i, s := range p.Wake.Stages {
+			// Wake stages were never validated at all, so an unknown client
+			// here surfaced only as a log line during a wake.
+			for _, ref := range s.Clients {
+				if strings.HasPrefix(ref, "tag:") {
+					tag := strings.TrimPrefix(ref, "tag:")
+					if _, ok := tagClients[tag]; !ok {
+						result.AddWarning("plan %q wake stage %d: tag %q matches no clients",
+							p.Name, i, tag)
+					}
+				} else if !clientNames[ref] {
+					result.AddError("plan %q wake stage %d: unknown client %q", p.Name, i, ref)
+				}
+			}
+		}
+
+		if p.Wake.Retries < 0 {
+			result.AddError("plan %q: wake.retries cannot be negative", p.Name)
+		}
+		for field, value := range map[string]string{
+			"wake.stagger":        p.Wake.Stagger,
+			"wake.probe_interval": p.Wake.ProbeInterval,
+			"wake.boot_deadline":  p.Wake.BootDeadline,
+		} {
+			if value == "" {
+				continue
+			}
+			if _, err := ParseDuration(value); err != nil {
+				result.AddError("plan %q: invalid %s: %s", p.Name, field, err)
+			}
+		}
 	}
 }
 
@@ -265,7 +385,7 @@ func validateDependencies(cfg *Config, result *ValidationResult) {
 	}
 }
 
-func validateConditionConfig(c *ConditionConfig, context string, result *ValidationResult) {
+func validateConditionConfig(c *ConditionConfig, context string, result *ValidationResult, reg *Registry) {
 	if c == nil {
 		result.AddError("%s: condition is nil", context)
 		return
@@ -303,18 +423,25 @@ func validateConditionConfig(c *ConditionConfig, context string, result *Validat
 			result.AddError("%s: %s condition requires nested conditions", context, condType)
 		}
 		for i := range c.Conditions {
-			validateConditionConfig(&c.Conditions[i], fmt.Sprintf("%s.conditions[%d]", context, i), result)
+			validateConditionConfig(&c.Conditions[i], fmt.Sprintf("%s.conditions[%d]", context, i), result, reg)
 		}
 	case "not":
 		if len(c.Conditions) != 1 {
 			result.AddError("%s: not condition requires exactly one nested condition", context)
 		}
 		if len(c.Conditions) > 0 {
-			validateConditionConfig(&c.Conditions[0], fmt.Sprintf("%s.conditions[0]", context), result)
+			validateConditionConfig(&c.Conditions[0], fmt.Sprintf("%s.conditions[0]", context), result, reg)
 		}
 	case "template":
 		if c.Value == "" {
 			result.AddError("%s: template condition requires 'value'", context)
+			break
+		}
+		// ValidateExpr existed from the beginning and was never called, so a
+		// malformed expression was not a config error — it simply evaluated
+		// to unavailable forever, and the condition it guarded never fired.
+		if err := ExprValidator(c.Value); err != nil {
+			result.AddError("%s: %s", context, err)
 		}
 	case "", "true", "false":
 		// literal conditions are always valid
@@ -323,10 +450,48 @@ func validateConditionConfig(c *ConditionConfig, context string, result *Validat
 	}
 
 	if c.For != "" {
-		if _, err := ParseDuration(c.For); err != nil {
+		if d, err := ParseDuration(c.For); err != nil {
 			result.AddError("%s: invalid 'for' duration: %s", context, err)
+		} else if d < 0 {
+			result.AddError("%s: 'for' duration cannot be negative", context)
 		}
 	}
+
+	// Fact references are checked against what the configured sources
+	// actually declare. A typo here is invisible at runtime: the condition
+	// evaluates to unavailable forever and its plan never triggers.
+	if c.Fact != "" && reg != nil && len(reg.Facts) > 0 && !slices.Contains(reg.Facts, c.Fact) {
+		result.AddError("%s: unknown fact %q (did you mean one of: %s)",
+			context, c.Fact, strings.Join(nearestFacts(c.Fact, reg.Facts), ", "))
+	}
+}
+
+// ExprValidator type-checks a template expression.
+//
+// It is a variable so the config package need not import the conditions
+// package, which imports config; main wires the real implementation in.
+var ExprValidator = func(expression string) error { return nil }
+
+// nearestFacts returns up to three declared facts sharing a prefix with the
+// unknown one, to make the error actionable.
+func nearestFacts(unknown string, known []string) []string {
+	source, _, _ := strings.Cut(unknown, ".")
+
+	var matches []string
+	for _, k := range known {
+		if strings.HasPrefix(k, source+".") {
+			matches = append(matches, k)
+		}
+	}
+	if len(matches) == 0 {
+		matches = known
+	}
+
+	slices.Sort(matches)
+	if len(matches) > 3 {
+		matches = matches[:3]
+	}
+	return matches
 }
 
 func buildClientNameSet(cfg *Config) map[string]bool {

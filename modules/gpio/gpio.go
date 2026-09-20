@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/facts"
 	"github.com/warthog618/go-gpiocdev"
 )
 
@@ -24,6 +25,11 @@ type Config struct {
 	Pins []PinConfig `yaml:"pins"`
 }
 
+// instanceName is the fact-key prefix for every GPIO pin.
+const instanceName = "gpio"
+
+const defaultPollInterval = 5 * time.Second
+
 type PinConfig struct {
 	Name         string `yaml:"name"`
 	Chip         string `yaml:"chip"`
@@ -32,6 +38,18 @@ type PinConfig struct {
 	ActiveLow    bool   `yaml:"active_low"`
 	PollInterval string `yaml:"poll_interval"`
 	Description  string `yaml:"description"`
+}
+
+// pollInterval returns the pin's configured poll interval, or the default.
+func (p PinConfig) pollInterval() time.Duration {
+	if p.PollInterval == "" {
+		return defaultPollInterval
+	}
+	d, err := time.ParseDuration(p.PollInterval)
+	if err != nil || d <= 0 {
+		return defaultPollInterval
+	}
+	return d
 }
 
 func NewSource(cfg Config, logger *slog.Logger) *Source {
@@ -43,12 +61,26 @@ func NewSource(cfg Config, logger *slog.Logger) *Source {
 
 func (s *Source) Name() string { return "gpio" }
 
+// Declarations returns one declaration covering every configured pin.
+//
+// All GPIO facts share the "gpio" instance name, and the fact store keys its
+// staleness window by instance. Emitting one declaration per pin therefore
+// had each pin overwrite the previous pin's poll interval, so every fact was
+// judged fresh or stale against whichever pin happened to be configured
+// last. The declaration now carries the shortest configured interval, which
+// is the only value under which no pin is wrongly considered fresh.
 func (s *Source) Declarations() []engine.SourceDeclaration {
-	var decls []engine.SourceDeclaration
+	if len(s.pins) == 0 {
+		return nil
+	}
+
+	entries := make([]engine.FactDeclEntry, 0, len(s.pins))
+	shortest := time.Duration(0)
+
 	for _, pin := range s.pins {
-		poll, _ := time.ParseDuration(pin.PollInterval)
-		if poll == 0 {
-			poll = 5 * time.Second
+		poll := pin.pollInterval()
+		if shortest == 0 || poll < shortest {
+			shortest = poll
 		}
 
 		factType := "bool"
@@ -56,19 +88,35 @@ func (s *Source) Declarations() []engine.SourceDeclaration {
 			factType = "number"
 		}
 
-		decls = append(decls, engine.SourceDeclaration{
-			InstanceName: "gpio",
-			PollInterval: poll,
-			Facts: []engine.FactDeclEntry{
-				{
-					Name:        pin.Name,
-					Type:        factType,
-					Description: pin.Description,
-				},
-			},
+		entries = append(entries, engine.FactDeclEntry{
+			Name:        pin.Name,
+			Type:        factType,
+			Description: pin.Description,
 		})
 	}
-	return decls
+
+	return []engine.SourceDeclaration{{
+		InstanceName: instanceName,
+		PollInterval: shortest,
+		Facts:        entries,
+	}}
+}
+
+// RegisterFacts pre-registers the pins' fact declarations with the store.
+func RegisterFacts(store *facts.Store, cfg Config, logger *slog.Logger) {
+	src := NewSource(cfg, logger)
+	for _, decl := range src.Declarations() {
+		factDecls := make([]facts.FactDeclaration, 0, len(decl.Facts))
+		for _, f := range decl.Facts {
+			factDecls = append(factDecls, facts.FactDeclaration{
+				Name:        f.Name,
+				Type:        f.Type,
+				Description: f.Description,
+				Unit:        f.Unit,
+			})
+		}
+		store.RegisterSource(decl.InstanceName, decl.PollInterval, factDecls)
+	}
 }
 
 // chipDevicePath returns the device path for a chip name.
@@ -159,12 +207,7 @@ func (s *Source) Stop() error {
 }
 
 func (s *Source) pollLine(ctx context.Context, pin PinConfig, line *gpiocdev.Line, updates chan<- engine.FactUpdate) {
-	poll, _ := time.ParseDuration(pin.PollInterval)
-	if poll == 0 {
-		poll = 5 * time.Second
-	}
-
-	ticker := time.NewTicker(poll)
+	ticker := time.NewTicker(pin.pollInterval())
 	defer ticker.Stop()
 
 	for {
@@ -190,10 +233,14 @@ func (s *Source) pollLine(ctx context.Context, pin PinConfig, line *gpiocdev.Lin
 				fact = value == 1
 			}
 
-			updates <- engine.FactUpdate{
-				Key:       "gpio." + pin.Name,
+			select {
+			case updates <- engine.FactUpdate{
+				Key:       instanceName + "." + pin.Name,
 				Value:     fact,
 				Timestamp: time.Now(),
+			}:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}

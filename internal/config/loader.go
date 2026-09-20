@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,27 +17,146 @@ import (
 
 var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
+// LoadOptions controls how a configuration file is read.
+type LoadOptions struct {
+	// AllowMissingEnv substitutes a placeholder for unset ${VAR} references
+	// instead of failing, and reports them in MissingEnv.
+	//
+	// The daemon must not do this: running with a placeholder where a
+	// credential should be means every transport fails to authenticate
+	// during an outage. `canarium validate` does, because checking a
+	// config's structure in CI should not require production secrets.
+	AllowMissingEnv bool
+}
+
+// LoadResult carries a parsed config plus anything noteworthy about how it
+// was loaded.
+type LoadResult struct {
+	Config *Config
+
+	// MissingEnv lists environment variables the file references that were
+	// not set. Non-empty only when AllowMissingEnv is true.
+	MissingEnv []string
+}
+
+// Load reads, expands and parses a configuration file, requiring every
+// referenced environment variable to be set.
 func Load(path string) (*Config, error) {
+	res, err := LoadWith(path, LoadOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Config, nil
+}
+
+// LoadWith reads, expands and parses a configuration file.
+func LoadWith(path string, opts LoadOptions) (*LoadResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
-	expanded := envVarRe.ReplaceAllStringFunc(string(data), func(match string) string {
-		varName := match[2 : len(match)-1]
-		if val, ok := os.LookupEnv(varName); ok {
-			return val
-		}
-		return match
-	})
+	expanded, missing := expandEnv(string(data), opts.AllowMissingEnv)
+	if len(missing) > 0 && !opts.AllowMissingEnv {
+		// Previously an unresolved ${VAR} was left in place as a literal, so
+		// a credential silently became the nine-character string
+		// "${TOKEN}" and every request using it failed authentication with
+		// no indication why. The compose file shipped without passing the
+		// environment through at all, so this was the default experience.
+		return nil, fmt.Errorf(
+			"config references environment variables that are not set: %s\n"+
+				"Set them in the environment, or via env_file in compose.yaml",
+			strings.Join(missing, ", "))
+	}
+
+	cfg, err := parseStrict([]byte(expanded))
+	if err != nil {
+		return nil, err
+	}
+
+	applyDefaults(cfg)
+	return &LoadResult{Config: cfg, MissingEnv: missing}, nil
+}
+
+// parseStrict decodes YAML, rejecting keys the schema does not define.
+//
+// Without KnownFields, a misspelled key is silently discarded: writing
+// `point_of_no_retrun: true` produced a stage with no point of no return and
+// no complaint, and `wake_policy: retain-state` (hyphen, not underscore)
+// produced a client that was woken when it should not have been. For a tool
+// whose config decides whether machines get shut down, a typo must be an
+// error, not a default.
+func parseStrict(data []byte) (*Config, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
 
 	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("config file is empty")
+		}
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	applyDefaults(&cfg)
+	// A second document would be silently ignored otherwise.
+	var extra Config
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("config contains more than one YAML document; " +
+			"Canarium reads a single document")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
 	return &cfg, nil
+}
+
+// expandEnv substitutes ${VAR} references, reporting any that are unset.
+//
+// Substitution happens on the raw text before parsing, which is what makes
+// it work inside any YAML value. The cost is that a value containing a
+// newline or a quote can alter the document's structure, so values are
+// checked for characters that would do so.
+func expandEnv(raw string, placeholderForMissing bool) (expanded string, missing []string) {
+	seen := make(map[string]bool)
+
+	expanded = envVarRe.ReplaceAllStringFunc(raw, func(match string) string {
+		name := match[2 : len(match)-1]
+
+		val, ok := os.LookupEnv(name)
+		if !ok {
+			if !seen[name] {
+				seen[name] = true
+				missing = append(missing, name)
+			}
+			if placeholderForMissing {
+				// Something structurally valid, so the rest of the file
+				// still parses and can be checked.
+				return missingEnvPlaceholder
+			}
+			return match
+		}
+
+		return yamlSafe(val)
+	})
+
+	return expanded, missing
+}
+
+// missingEnvPlaceholder stands in for an unset variable during validation.
+const missingEnvPlaceholder = "unset-during-validation"
+
+// yamlSafe renders a substituted value so it cannot change the document's
+// structure.
+//
+// A secret containing a newline, a colon or a quote would otherwise be
+// spliced into the YAML as syntax. Wrapping anything suspicious in single
+// quotes — with embedded single quotes doubled, per the YAML spec — keeps it
+// a scalar.
+func yamlSafe(val string) string {
+	if !strings.ContainsAny(val, "\n\r\t\"':#{}[],&*?|<>=!%@`") {
+		return val
+	}
+	return "'" + strings.ReplaceAll(val, "'", "''") + "'"
 }
 
 func applyDefaults(cfg *Config) {

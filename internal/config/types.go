@@ -179,6 +179,20 @@ type PostShutdownConfig struct {
 	Password string `yaml:"password,omitempty"`
 }
 
+// comms_loss_assumes values, controlling how a client is treated when the
+// UPS feeding it stops reporting.
+const (
+	// CommsLossSafe treats a client whose feed has gone unknown as not
+	// threatened, so losing contact with a sensor never initiates a
+	// shutdown. This is the default and the behaviour the README promises.
+	CommsLossSafe = "safe"
+
+	// CommsLossThreatened treats a client whose feed has gone unknown as
+	// threatened, for operators who would rather shut down than risk
+	// running on an unmonitored UPS.
+	CommsLossThreatened = "threatened"
+)
+
 // Wait policies control what happens when a stage's entry condition does not
 // hold before wait_timeout expires.
 const (
