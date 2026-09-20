@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -17,6 +19,21 @@ import (
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
 	"github.com/nkcx/canarium/internal/state"
+)
+
+const (
+	// sessionTokenBytes is the size of a raw session token before hex
+	// encoding. 256 bits, matching the SHA-256 digest it is stored under.
+	sessionTokenBytes = 32
+
+	// sessionTTL is how long a session cookie remains valid.
+	sessionTTL = 24 * time.Hour
+
+	// sessionCookieName is the cookie carrying the session token.
+	sessionCookieName = "canarium_session"
+
+	// sessionKeyPrefix namespaces session rows in the kv table.
+	sessionKeyPrefix = "session:"
 )
 
 type Server struct {
@@ -236,17 +253,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := generateSessionToken()
+	token, err := newSessionToken()
+	if err != nil {
+		s.logger.Error("generating session token", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
 	http.SetCookie(w, &http.Cookie{
-		Name:     "canarium_session",
+		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   86400,
+		MaxAge:   int(sessionTTL.Seconds()),
 	})
 
-	s.db.SetKV("session:"+hashToken(token), time.Now().Add(24*time.Hour).Format(time.RFC3339))
+	if err := s.db.SetKV(sessionKey(token), time.Now().Add(sessionTTL).Format(time.RFC3339)); err != nil {
+		s.logger.Error("persisting session", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -297,14 +324,13 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		cookie, err := r.Cookie("canarium_session")
+		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 
-		sessionKey := "session:" + hashToken(cookie.Value)
-		expiryStr, err := s.db.GetKV(sessionKey)
+		expiryStr, err := s.db.GetKV(sessionKey(cookie.Value))
 		if err != nil || expiryStr == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid session"})
 			return
@@ -331,15 +357,30 @@ func hashPassword(password string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// sessionKey is the kv-table key under which a session's expiry is stored.
+// The raw token is never persisted, only its digest, so a database leak does
+// not yield usable session cookies.
+func sessionKey(token string) string {
+	return sessionKeyPrefix + hashToken(token)
+}
+
 func hashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])
 }
 
-func generateSessionToken() string {
-	b := make([]byte, 32)
-	for i := range b {
-		b[i] = byte(time.Now().UnixNano() >> (i % 8))
+// newSessionToken returns a cryptographically random 256-bit session token,
+// hex-encoded.
+//
+// This must never be derived from the clock. A token seeded from
+// time.Now() carries only the entropy of "when did this login happen",
+// which an attacker who can observe or provoke a login can search
+// exhaustively, and it degenerates further on platforms with coarse clock
+// resolution.
+func newSessionToken() (string, error) {
+	b := make([]byte, sessionTokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating session token: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
