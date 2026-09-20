@@ -435,7 +435,7 @@ func (e *Executor) buildClient(c *config.ClientConfig) *Client {
 	}
 
 	if c.Probe != nil {
-		timeout, _ := config.ParseDuration(c.Probe.Timeout)
+		timeout := e.duration(c.Probe.Timeout, 0, "probe.timeout", "client", c.Name)
 		client.ProbeConfig = ProbeConfig{
 			Method:  c.Probe.Method,
 			Port:    c.Probe.Port,

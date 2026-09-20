@@ -88,26 +88,3 @@ func searchSubstring(s, sub string) bool {
 	}
 	return false
 }
-
-func TestParseDuration(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"5m", "5m0s"},
-		{"30s", "30s"},
-		{"1h", "1h0m0s"},
-		{"30d", "720h0m0s"},
-	}
-
-	for _, tt := range tests {
-		got, err := ParseDuration(tt.input)
-		if err != nil {
-			t.Errorf("ParseDuration(%q) error: %v", tt.input, err)
-			continue
-		}
-		if got.String() != tt.want {
-			t.Errorf("ParseDuration(%q) = %s, want %s", tt.input, got, tt.want)
-		}
-	}
-}

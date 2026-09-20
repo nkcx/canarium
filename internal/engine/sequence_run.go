@@ -159,14 +159,8 @@ const (
 // waitForStage blocks until a stage's `when` condition holds, the plan's
 // abort condition fires, the wait budget expires, or the daemon shuts down.
 func (e *Executor) waitForStage(as *ActiveSequence, stage *config.StageConfig) stageOutcome {
-	waitTimeout, err := config.ParseDuration(stage.WaitTimeout)
-	if err != nil {
-		e.logger.Error("invalid wait_timeout; using the default",
-			"stage", stage.Name, "value", stage.WaitTimeout, "error", err)
-	}
-	if waitTimeout == 0 {
-		waitTimeout = config.DefaultWaitTimeout()
-	}
+	waitTimeout := e.duration(stage.WaitTimeout, config.DefaultWaitTimeout(),
+		"wait_timeout", "stage", stage.Name)
 	deadline := time.Now().Add(waitTimeout)
 
 	for {
@@ -212,14 +206,8 @@ func (e *Executor) shouldAbort(as *ActiveSequence) bool {
 func (e *Executor) executeStage(as *ActiveSequence, stage *config.StageConfig, stageIdx int) {
 	clients := config.ResolveClientRefs(stage.Clients, e.cfg)
 
-	budget, err := config.ParseDuration(stage.Budget)
-	if err != nil {
-		e.logger.Error("invalid stage budget; using the default",
-			"stage", stage.Name, "value", stage.Budget, "error", err)
-	}
-	if budget == 0 {
-		budget = config.DefaultShutdownBudget()
-	}
+	budget := e.duration(stage.Budget, config.DefaultShutdownBudget(),
+		"budget", "stage", stage.Name)
 
 	record := &state.StageRecord{
 		SequenceID: as.ID(),
@@ -354,14 +342,13 @@ func (e *Executor) awaitClientDown(
 	stageBudget time.Duration,
 	finish func(ClientState, string) state.ClientResult,
 ) state.ClientResult {
-	clientBudget, err := config.ParseDuration(clientCfg.ShutdownBudget)
-	if err != nil {
-		e.logger.Error("invalid shutdown_budget; using the stage budget",
-			"client", name, "value", clientCfg.ShutdownBudget, "error", err)
-	}
-	if clientBudget == 0 || clientBudget > stageBudget {
+	clientBudget := e.duration(clientCfg.ShutdownBudget, stageBudget,
+		"shutdown_budget", "client", name)
+	if clientBudget > stageBudget {
 		// The stage budget bounds the context, so a longer per-client budget
 		// could never be honoured anyway.
+		e.logger.Warn("client shutdown_budget exceeds the stage budget; capping",
+			"client", name, "shutdown_budget", clientBudget, "stage_budget", stageBudget)
 		clientBudget = stageBudget
 	}
 	deadline := time.Now().Add(clientBudget)
@@ -414,14 +401,8 @@ func (e *Executor) waitForShuttingDown(as *ActiveSequence) {
 			continue
 		}
 
-		budget, err := config.ParseDuration(c.ShutdownBudget)
-		if err != nil {
-			e.logger.Error("invalid shutdown_budget; using the default",
-				"client", c.Name, "value", c.ShutdownBudget, "error", err)
-		}
-		if budget == 0 {
-			budget = config.DefaultShutdownBudget()
-		}
+		budget := e.duration(c.ShutdownBudget, config.DefaultShutdownBudget(),
+			"shutdown_budget", "client", c.Name)
 		deadline := time.Now().Add(budget)
 
 		for time.Now().Before(deadline) {
@@ -462,14 +443,9 @@ func (e *Executor) runWake(as *ActiveSequence) {
 	as.SetState(SeqStateWaking)
 	e.saveSequence(as)
 
-	stagger, err := config.ParseDuration(plan.Wake.Stagger)
-	if err != nil {
-		e.logger.Error("invalid wake stagger; using the default",
-			"plan", plan.Name, "value", plan.Wake.Stagger, "error", err)
-	}
-	if stagger == 0 {
-		stagger = config.DefaultStagger()
-	}
+	// An explicit "0s" means wake everything at once and is honoured as such.
+	stagger := e.duration(plan.Wake.Stagger, config.DefaultStagger(),
+		"wake.stagger", "plan", plan.Name)
 
 	order := e.computeWakeOrder(plan)
 	seqID := as.ID()
@@ -500,14 +476,8 @@ func (e *Executor) runWake(as *ActiveSequence) {
 		}
 
 		if e.GetClientState(name) == StateDownUnverified {
-			guard, err := config.ParseDuration(clientCfg.GuardPeriod)
-			if err != nil {
-				e.logger.Error("invalid guard_period; using the default",
-					"client", name, "value", clientCfg.GuardPeriod, "error", err)
-			}
-			if guard == 0 {
-				guard = config.DefaultGuardPeriod()
-			}
+			guard := e.duration(clientCfg.GuardPeriod, config.DefaultGuardPeriod(),
+				"guard_period", "client", name)
 			// The host may still be completing its shutdown; waking it now
 			// could interrupt that and leave it in an unknown state.
 			e.logger.Info("waiting out the guard period before waking an unverified host",
@@ -591,21 +561,13 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 		retries = 0
 	}
 
-	bootDeadline, err := config.ParseDuration(plan.Wake.BootDeadline)
-	if err != nil {
-		e.logger.Error("invalid boot_deadline; using the default",
-			"plan", plan.Name, "value", plan.Wake.BootDeadline, "error", err)
-	}
-	if bootDeadline == 0 {
-		bootDeadline = config.DefaultBootDeadline()
-	}
+	bootDeadline := e.duration(plan.Wake.BootDeadline, config.DefaultBootDeadline(),
+		"wake.boot_deadline", "plan", plan.Name)
 
-	probeInterval, err := config.ParseDuration(plan.Wake.ProbeInterval)
-	if err != nil {
-		e.logger.Error("invalid probe_interval; using the default",
-			"plan", plan.Name, "value", plan.Wake.ProbeInterval, "error", err)
-	}
-	if probeInterval == 0 {
+	probeInterval := e.duration(plan.Wake.ProbeInterval, config.DefaultProbeInterval(),
+		"wake.probe_interval", "plan", plan.Name)
+	if probeInterval <= 0 {
+		// A zero probe interval would spin the CPU until the boot deadline.
 		probeInterval = config.DefaultProbeInterval()
 	}
 
@@ -760,6 +722,17 @@ func (e *Executor) sleep(d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// duration resolves a configured duration, logging and falling back to def
+// when the value cannot be parsed. An explicit "0s" is honoured as zero.
+func (e *Executor) duration(value string, def time.Duration, field string, attrs ...any) time.Duration {
+	d, err := config.Duration(value, def)
+	if err != nil {
+		args := append([]any{"field", field, "value", value, "default", def, "error", err}, attrs...)
+		e.logger.Error("invalid duration in config; using the default", args...)
+	}
+	return d
 }
 
 func (e *Executor) saveIntent(intent *state.Intent) {

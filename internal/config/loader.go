@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +95,32 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
+// Duration resolves a configured duration, returning def when the value is
+// absent.
+//
+// An explicitly configured zero is honoured. `stagger: 0s` means "wake
+// everything at once", not "use the 45-second default" — but code that
+// parsed the string and then tested the result against zero could not tell
+// an explicit "0s" from an unset field, so an operator asking for no stagger
+// silently got 45 seconds between every host. The same pattern affected
+// budgets, guard periods, wait timeouts and probe intervals.
+//
+// An unparseable value returns def along with the error, so callers can log
+// the problem and still proceed with a sane value.
+func Duration(value string, def time.Duration) (time.Duration, error) {
+	if strings.TrimSpace(value) == "" {
+		return def, nil
+	}
+
+	d, err := ParseDuration(value)
+	if err != nil {
+		return def, err
+	}
+	return d, nil
+}
+
+// ParseDuration parses a duration string, additionally accepting a "d"
+// (days) suffix that time.ParseDuration does not.
 func ParseDuration(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
@@ -105,10 +132,13 @@ func ParseDuration(s string) (time.Duration, error) {
 		return d, nil
 	}
 
-	if strings.HasSuffix(s, "d") {
-		numStr := strings.TrimSuffix(s, "d")
-		var days float64
-		if _, err := fmt.Sscanf(numStr, "%f", &days); err == nil {
+	// time.ParseDuration has no unit larger than an hour, but journal
+	// retention is naturally expressed in days.
+	if numStr, ok := strings.CutSuffix(s, "d"); ok {
+		// strconv, not fmt.Sscanf: Sscanf stops at the first character it
+		// cannot consume and reports success, so "7dogs" parsed as 7 days.
+		days, err := strconv.ParseFloat(numStr, 64)
+		if err == nil {
 			return time.Duration(days * 24 * float64(time.Hour)), nil
 		}
 	}
