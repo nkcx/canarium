@@ -106,7 +106,7 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 	if err != nil {
 		return nil, fmt.Errorf("ssh connect: %w", err)
 	}
-	defer sshClient.Close()
+	defer func() { _ = sshClient.Close() }()
 
 	command := t.cfg.Command
 	if s := configString(client.TransportConfig, "command"); s != "" {

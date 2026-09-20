@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,7 @@ const (
 	busyTimeoutMS = 5000
 )
 
-func Open(dataDir string) (*DB, error) {
+func Open(ctx context.Context, dataDir string) (*DB, error) {
 	if err := os.MkdirAll(dataDir, dataDirMode); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
@@ -63,13 +64,13 @@ func Open(dataDir string) (*DB, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
-	if err := db.Ping(); err != nil {
-		db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close() // the open failed; the close error adds nothing
 		return nil, fmt.Errorf("opening database at %s: %w", dbPath, err)
 	}
 
-	if err := migrate(db); err != nil {
-		db.Close()
+	if err := migrate(ctx, db); err != nil {
+		_ = db.Close() // already failing; report the migration error
 		return nil, fmt.Errorf("migrating database: %w", err)
 	}
 
@@ -78,7 +79,7 @@ func Open(dataDir string) (*DB, error) {
 	// directory's permissions.
 	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
 		if err := os.Chmod(path, dbFileMode); err != nil && !os.IsNotExist(err) {
-			db.Close()
+			_ = db.Close() // already failing; report the chmod error
 			return nil, fmt.Errorf("restricting permissions on %s: %w", path, err)
 		}
 	}
@@ -90,7 +91,7 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
-func (d *DB) SaveSequence(seq *Sequence) error {
+func (d *DB) SaveSequence(ctx context.Context, seq *Sequence) error {
 	preState, _ := json.Marshal(seq.PreSequenceState)
 	resolved, _ := json.Marshal(seq.ResolvedAddrs)
 
@@ -100,7 +101,7 @@ func (d *DB) SaveSequence(seq *Sequence) error {
 		completedAt = &s
 	}
 
-	_, err := d.db.Exec(`
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO sequences (id, plan_name, state, current_stage, ponr_crossed, started_at, completed_at, config_snapshot, pre_sequence_state, resolved_addrs)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -114,8 +115,8 @@ func (d *DB) SaveSequence(seq *Sequence) error {
 	return err
 }
 
-func (d *DB) GetActiveSequence() (*Sequence, error) {
-	row := d.db.QueryRow(`
+func (d *DB) GetActiveSequence(ctx context.Context) (*Sequence, error) {
+	row := d.db.QueryRowContext(ctx, `
 		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at, completed_at, config_snapshot, pre_sequence_state, resolved_addrs
 		FROM sequences
 		WHERE state NOT IN ('completed', 'failed', 'idle')
@@ -167,8 +168,8 @@ func scanSequence(row *sql.Row) (*Sequence, error) {
 
 // LastSequence returns the most recently started sequence, or nil if none
 // has ever run.
-func (d *DB) LastSequence() (*Sequence, error) {
-	row := d.db.QueryRow(`
+func (d *DB) LastSequence(ctx context.Context) (*Sequence, error) {
+	row := d.db.QueryRowContext(ctx, `
 		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at,
 		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs
 		FROM sequences
@@ -178,8 +179,8 @@ func (d *DB) LastSequence() (*Sequence, error) {
 	return scanSequence(row)
 }
 
-func (d *DB) SaveClientState(name, state string, sequenceID *string) error {
-	_, err := d.db.Exec(`
+func (d *DB) SaveClientState(ctx context.Context, name, state string, sequenceID *string) error {
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO client_states (client_name, state, updated_at, sequence_id)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(client_name) DO UPDATE SET
@@ -190,17 +191,17 @@ func (d *DB) SaveClientState(name, state string, sequenceID *string) error {
 	return err
 }
 
-func (d *DB) GetClientState(name string) (string, error) {
+func (d *DB) GetClientState(ctx context.Context, name string) (string, error) {
 	var state string
-	err := d.db.QueryRow("SELECT state FROM client_states WHERE client_name = ?", name).Scan(&state)
+	err := d.db.QueryRowContext(ctx, "SELECT state FROM client_states WHERE client_name = ?", name).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "unknown", nil
 	}
 	return state, err
 }
 
-func (d *DB) GetAllClientStates() (map[string]string, error) {
-	rows, err := d.db.Query("SELECT client_name, state FROM client_states")
+func (d *DB) GetAllClientStates(ctx context.Context) (map[string]string, error) {
+	rows, err := d.db.QueryContext(ctx, "SELECT client_name, state FROM client_states")
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +218,7 @@ func (d *DB) GetAllClientStates() (map[string]string, error) {
 	return result, rows.Err()
 }
 
-func (d *DB) SaveIntent(intent *Intent) error {
+func (d *DB) SaveIntent(ctx context.Context, intent *Intent) error {
 	var result *string
 	if intent.Result != nil {
 		b, _ := json.Marshal(intent.Result)
@@ -225,7 +226,7 @@ func (d *DB) SaveIntent(intent *Intent) error {
 		result = &s
 	}
 
-	_, err := d.db.Exec(`
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO intents (id, sequence_id, client_name, action, timestamp, status, result)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -236,7 +237,7 @@ func (d *DB) SaveIntent(intent *Intent) error {
 	return err
 }
 
-func (d *DB) SaveStageRecord(rec *StageRecord) error {
+func (d *DB) SaveStageRecord(ctx context.Context, rec *StageRecord) error {
 	clients, _ := json.Marshal(rec.Clients)
 	var completedAt *string
 	if rec.CompletedAt != nil {
@@ -244,7 +245,7 @@ func (d *DB) SaveStageRecord(rec *StageRecord) error {
 		completedAt = &s
 	}
 
-	_, err := d.db.Exec(`
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO stage_records (sequence_id, stage_index, stage_name, started_at, completed_at, clients)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(sequence_id, stage_index) DO UPDATE SET
@@ -255,8 +256,8 @@ func (d *DB) SaveStageRecord(rec *StageRecord) error {
 	return err
 }
 
-func (d *DB) GetCompletedStages(sequenceID string) ([]int, error) {
-	rows, err := d.db.Query(
+func (d *DB) GetCompletedStages(ctx context.Context, sequenceID string) ([]int, error) {
+	rows, err := d.db.QueryContext(ctx,
 		"SELECT stage_index FROM stage_records WHERE sequence_id = ? AND completed_at IS NOT NULL ORDER BY stage_index",
 		sequenceID)
 	if err != nil {
@@ -284,8 +285,8 @@ func (d *DB) GetCompletedStages(sequenceID string) ([]int, error) {
 // silently shut nothing down.
 //
 // Returns false only when a *different* sequence holds the lock.
-func (d *DB) AcquireClientLock(clientName, sequenceID string) (bool, error) {
-	res, err := d.db.Exec(`
+func (d *DB) AcquireClientLock(ctx context.Context, clientName, sequenceID string) (bool, error) {
+	res, err := d.db.ExecContext(ctx, `
 		INSERT INTO client_locks (client_name, sequence_id, locked_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(client_name) DO UPDATE SET
@@ -305,9 +306,9 @@ func (d *DB) AcquireClientLock(clientName, sequenceID string) (bool, error) {
 
 // ClientLockHolder returns the sequence holding a client's lock, or "" if it
 // is unlocked.
-func (d *DB) ClientLockHolder(clientName string) (string, error) {
+func (d *DB) ClientLockHolder(ctx context.Context, clientName string) (string, error) {
 	var seqID string
-	err := d.db.QueryRow(
+	err := d.db.QueryRowContext(ctx,
 		"SELECT sequence_id FROM client_locks WHERE client_name = ?", clientName).Scan(&seqID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -318,44 +319,44 @@ func (d *DB) ClientLockHolder(clientName string) (string, error) {
 	return seqID, nil
 }
 
-func (d *DB) ReleaseClientLock(clientName string) error {
-	_, err := d.db.Exec("DELETE FROM client_locks WHERE client_name = ?", clientName)
+func (d *DB) ReleaseClientLock(ctx context.Context, clientName string) error {
+	_, err := d.db.ExecContext(ctx, "DELETE FROM client_locks WHERE client_name = ?", clientName)
 	return err
 }
 
-func (d *DB) ReleaseSequenceLocks(sequenceID string) error {
-	_, err := d.db.Exec("DELETE FROM client_locks WHERE sequence_id = ?", sequenceID)
+func (d *DB) ReleaseSequenceLocks(ctx context.Context, sequenceID string) error {
+	_, err := d.db.ExecContext(ctx, "DELETE FROM client_locks WHERE sequence_id = ?", sequenceID)
 	return err
 }
 
-func (d *DB) SetKV(key, value string) error {
-	_, err := d.db.Exec(`
+func (d *DB) SetKV(ctx context.Context, key, value string) error {
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO kv (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, key, value)
 	return err
 }
 
-func (d *DB) GetKV(key string) (string, error) {
+func (d *DB) GetKV(ctx context.Context, key string) (string, error) {
 	var value string
-	err := d.db.QueryRow("SELECT value FROM kv WHERE key = ?", key).Scan(&value)
+	err := d.db.QueryRowContext(ctx, "SELECT value FROM kv WHERE key = ?", key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, err
 }
 
-func (d *DB) SetPasswordHash(hash string) error {
-	_, err := d.db.Exec(`
+func (d *DB) SetPasswordHash(ctx context.Context, hash string) error {
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO auth (id, password_hash) VALUES (1, ?)
 		ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash
 	`, hash)
 	return err
 }
 
-func (d *DB) GetPasswordHash() (string, error) {
+func (d *DB) GetPasswordHash(ctx context.Context) (string, error) {
 	var hash string
-	err := d.db.QueryRow("SELECT password_hash FROM auth WHERE id = 1").Scan(&hash)
+	err := d.db.QueryRowContext(ctx, "SELECT password_hash FROM auth WHERE id = 1").Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

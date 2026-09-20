@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 )
@@ -163,8 +164,8 @@ var migrations = []migration{
 // Each migration runs inside its own transaction together with the bookkeeping
 // row that records it, so a failure part way through leaves the database at
 // the last fully applied version rather than in a half-migrated state.
-func migrate(db *sql.DB) error {
-	if _, err := db.Exec(`
+func migrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    INTEGER PRIMARY KEY,
 			name       TEXT NOT NULL,
@@ -173,7 +174,7 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("creating schema_migrations: %w", err)
 	}
 
-	applied, err := appliedVersions(db)
+	applied, err := appliedVersions(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -182,7 +183,7 @@ func migrate(db *sql.DB) error {
 		if applied[m.version] {
 			continue
 		}
-		if err := applyMigration(db, m); err != nil {
+		if err := applyMigration(ctx, db, m); err != nil {
 			return fmt.Errorf("migration %d (%s): %w", m.version, m.name, err)
 		}
 	}
@@ -190,8 +191,8 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-func appliedVersions(db *sql.DB) (map[int]bool, error) {
-	rows, err := db.Query("SELECT version FROM schema_migrations")
+func appliedVersions(ctx context.Context, db *sql.DB) (map[int]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT version FROM schema_migrations")
 	if err != nil {
 		return nil, fmt.Errorf("reading applied migrations: %w", err)
 	}
@@ -208,20 +209,20 @@ func appliedVersions(db *sql.DB) (map[int]bool, error) {
 	return applied, rows.Err()
 }
 
-func applyMigration(db *sql.DB, m migration) error {
-	tx, err := db.Begin()
+func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once the tx is committed
 
 	for i, stmt := range m.stmts {
-		if _, err := tx.Exec(stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("statement %d: %w", i, err)
 		}
 	}
 
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
 		m.version, m.name, nowUnixString(),
 	); err != nil {
@@ -233,9 +234,9 @@ func applyMigration(db *sql.DB, m migration) error {
 
 // SchemaVersion returns the highest applied migration version. Zero means an
 // empty database.
-func (d *DB) SchemaVersion() (int, error) {
+func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
 	var version sql.NullInt64
-	err := d.db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version)
+	err := d.db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("reading schema version: %w", err)
 	}

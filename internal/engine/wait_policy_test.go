@@ -51,7 +51,7 @@ func TestSkippedStageIsRecordedAndAnnounced(t *testing.T) {
 	}
 
 	// The journal must record the skip, naming the clients left running.
-	stages, err := h.db.GetCompletedStages(h.lastSequenceID(t))
+	stages, err := h.db.GetCompletedStages(t.Context(), h.lastSequenceID(t))
 	if err != nil {
 		t.Fatalf("GetCompletedStages: %v", err)
 	}

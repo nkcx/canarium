@@ -1,6 +1,7 @@
 package conditions
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -185,7 +186,7 @@ func newFakeDwellStore() *fakeDwellStore {
 	return &fakeDwellStore{records: make(map[string]DwellRecord)}
 }
 
-func (f *fakeDwellStore) LoadDwellTrackers() (map[string]DwellRecord, error) {
+func (f *fakeDwellStore) LoadDwellTrackers(ctx context.Context) (map[string]DwellRecord, error) {
 	out := make(map[string]DwellRecord, len(f.records))
 	for k, v := range f.records {
 		out[k] = v
@@ -193,13 +194,13 @@ func (f *fakeDwellStore) LoadDwellTrackers() (map[string]DwellRecord, error) {
 	return out, nil
 }
 
-func (f *fakeDwellStore) SaveDwellTracker(key string, rec DwellRecord) error {
+func (f *fakeDwellStore) SaveDwellTracker(ctx context.Context, key string, rec DwellRecord) error {
 	f.records[key] = rec
 	f.saves++
 	return nil
 }
 
-func (f *fakeDwellStore) DeleteDwellTracker(key string) error {
+func (f *fakeDwellStore) DeleteDwellTracker(ctx context.Context, key string) error {
 	delete(f.records, key)
 	return nil
 }
@@ -210,7 +211,7 @@ func TestDwellSurvivesRestart(t *testing.T) {
 	store := newFakeDwellStore()
 
 	ev1, factStore1, cond := dwellFixture(t, "10m")
-	if err := ev1.SetDwellStore(store); err != nil {
+	if err := ev1.SetDwellStore(context.Background(), store); err != nil {
 		t.Fatalf("SetDwellStore: %v", err)
 	}
 
@@ -227,7 +228,7 @@ func TestDwellSurvivesRestart(t *testing.T) {
 
 	// Restart: a fresh evaluator loading the same store.
 	ev2, factStore2, _ := dwellFixture(t, "10m")
-	if err := ev2.SetDwellStore(store); err != nil {
+	if err := ev2.SetDwellStore(context.Background(), store); err != nil {
 		t.Fatalf("SetDwellStore after restart: %v", err)
 	}
 
@@ -259,7 +260,7 @@ func TestRestartGapIsNotCredited(t *testing.T) {
 	store := newFakeDwellStore()
 
 	ev1, factStore1, cond := dwellFixture(t, "10m")
-	if err := ev1.SetDwellStore(store); err != nil {
+	if err := ev1.SetDwellStore(context.Background(), store); err != nil {
 		t.Fatalf("SetDwellStore: %v", err)
 	}
 
@@ -273,7 +274,7 @@ func TestRestartGapIsNotCredited(t *testing.T) {
 
 	// The daemon is down for an hour.
 	ev2, factStore2, _ := dwellFixture(t, "10m")
-	if err := ev2.SetDwellStore(store); err != nil {
+	if err := ev2.SetDwellStore(context.Background(), store); err != nil {
 		t.Fatalf("SetDwellStore: %v", err)
 	}
 

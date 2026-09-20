@@ -8,11 +8,11 @@ import (
 func TestAPITokenRoundTrip(t *testing.T) {
 	db := newTestDB(t)
 
-	if err := db.SaveAPIToken("digest-1", "monitoring", ScopeRead); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "digest-1", "monitoring", ScopeRead); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
 
-	scope, err := db.ValidateAPIToken("digest-1")
+	scope, err := db.ValidateAPIToken(t.Context(), "digest-1")
 	if err != nil {
 		t.Fatalf("ValidateAPIToken: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestAPITokenRoundTrip(t *testing.T) {
 func TestUnknownTokenHasNoScope(t *testing.T) {
 	db := newTestDB(t)
 
-	scope, err := db.ValidateAPIToken("never-issued")
+	scope, err := db.ValidateAPIToken(t.Context(), "never-issued")
 	if err != nil {
 		t.Fatalf("ValidateAPIToken: %v", err)
 	}
@@ -36,11 +36,11 @@ func TestUnknownTokenHasNoScope(t *testing.T) {
 func TestDuplicateTokenNameIsRejected(t *testing.T) {
 	db := newTestDB(t)
 
-	if err := db.SaveAPIToken("digest-1", "monitoring", ScopeRead); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "digest-1", "monitoring", ScopeRead); err != nil {
 		t.Fatalf("first SaveAPIToken: %v", err)
 	}
 
-	err := db.SaveAPIToken("digest-2", "monitoring", ScopeAdmin)
+	err := db.SaveAPIToken(t.Context(), "digest-2", "monitoring", ScopeAdmin)
 	if !errors.Is(err, ErrTokenExists) {
 		t.Errorf("second SaveAPIToken with the same name = %v, want ErrTokenExists", err)
 	}
@@ -49,14 +49,14 @@ func TestDuplicateTokenNameIsRejected(t *testing.T) {
 func TestListAPITokens(t *testing.T) {
 	db := newTestDB(t)
 
-	if err := db.SaveAPIToken("d1", "monitoring", ScopeRead); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "d1", "monitoring", ScopeRead); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
-	if err := db.SaveAPIToken("d2", "automation", ScopeAdmin); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "d2", "automation", ScopeAdmin); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
 
-	tokens, err := db.ListAPITokens()
+	tokens, err := db.ListAPITokens(t.Context())
 	if err != nil {
 		t.Fatalf("ListAPITokens: %v", err)
 	}
@@ -79,14 +79,14 @@ func TestListAPITokens(t *testing.T) {
 func TestValidateRecordsLastUsed(t *testing.T) {
 	db := newTestDB(t)
 
-	if err := db.SaveAPIToken("d1", "monitoring", ScopeRead); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "d1", "monitoring", ScopeRead); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
-	if _, err := db.ValidateAPIToken("d1"); err != nil {
+	if _, err := db.ValidateAPIToken(t.Context(), "d1"); err != nil {
 		t.Fatalf("ValidateAPIToken: %v", err)
 	}
 
-	tokens, err := db.ListAPITokens()
+	tokens, err := db.ListAPITokens(t.Context())
 	if err != nil {
 		t.Fatalf("ListAPITokens: %v", err)
 	}
@@ -101,11 +101,11 @@ func TestValidateRecordsLastUsed(t *testing.T) {
 func TestDeleteAPIToken(t *testing.T) {
 	db := newTestDB(t)
 
-	if err := db.SaveAPIToken("d1", "monitoring", ScopeRead); err != nil {
+	if err := db.SaveAPIToken(t.Context(), "d1", "monitoring", ScopeRead); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
 
-	removed, err := db.DeleteAPIToken("monitoring")
+	removed, err := db.DeleteAPIToken(t.Context(), "monitoring")
 	if err != nil {
 		t.Fatalf("DeleteAPIToken: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestDeleteAPIToken(t *testing.T) {
 		t.Error("DeleteAPIToken reported no rows removed")
 	}
 
-	scope, err := db.ValidateAPIToken("d1")
+	scope, err := db.ValidateAPIToken(t.Context(), "d1")
 	if err != nil {
 		t.Fatalf("ValidateAPIToken: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestDeleteAPIToken(t *testing.T) {
 func TestDeleteUnknownTokenReportsFalse(t *testing.T) {
 	db := newTestDB(t)
 
-	removed, err := db.DeleteAPIToken("never-existed")
+	removed, err := db.DeleteAPIToken(t.Context(), "never-existed")
 	if err != nil {
 		t.Fatalf("DeleteAPIToken: %v", err)
 	}

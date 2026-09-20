@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -300,7 +301,9 @@ func doctorCmd(configPath *string) *cobra.Command {
 			fmt.Printf("Running preflight checks (this contacts every configured host)...\n\n")
 			report := d.Run(cmd.Context())
 
-			printDoctorReport(report)
+			if err := printDoctorReport(report); err != nil {
+				return err
+			}
 
 			if report.HasFailures() {
 				return fmt.Errorf("preflight checks failed")
@@ -318,19 +321,23 @@ func doctorCmd(configPath *string) *cobra.Command {
 }
 
 // printDoctorReport renders a preflight report as an aligned table.
-func printDoctorReport(report *doctor.Report) {
+func printDoctorReport(report *doctor.Report) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STATUS\tSUBJECT\tCHECK\tDETAIL")
 
 	for _, c := range report.Checks {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Status, c.Subject, c.Name, c.Detail)
 	}
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("writing report: %w", err)
+	}
 
 	counts := report.Counts()
 	fmt.Printf("\n%d ok, %d warning(s), %d failure(s), %d skipped\n",
 		counts[doctor.StatusOK], counts[doctor.StatusWarn],
 		counts[doctor.StatusFail], counts[doctor.StatusSkip])
+
+	return nil
 }
 
 func simulateCmd(configPath *string) *cobra.Command {
@@ -468,18 +475,29 @@ func runDaemon(configPath string) error {
 		logger.Warn("config warning", "warning", w)
 	}
 
-	db, err := state.Open(cfg.Canarium.DataDir)
+	// Signals are wired before anything that could block, so an operator
+	// can interrupt a slow startup.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	db, err := state.Open(ctx, cfg.Canarium.DataDir)
 	if err != nil {
 		return fmt.Errorf("opening state database: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		// A close error on SQLite can mean the WAL was not checkpointed,
+		// which matters for state the executor may need on restart.
+		if err := db.Close(); err != nil {
+			logger.Error("closing the state database", "error", err)
+		}
+	}()
 
 	store := facts.NewStore()
 	evaluator := conditions.NewEvaluator(store)
 
 	// Restore dwell progress so a restart partway through a "for: 5m"
 	// condition does not silently start the five minutes again.
-	if err := evaluator.SetDwellStore(db); err != nil {
+	if err := evaluator.SetDwellStore(ctx, db); err != nil {
 		logger.Error("restoring dwell state; timers will start from zero", "error", err)
 	}
 	evaluator.SetPersistErrorHandler(func(key string, err error) {
@@ -494,9 +512,6 @@ func runDaemon(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("configuring sources: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if err := sources.Start(ctx, store); err != nil {
 		return fmt.Errorf("starting sources: %w", err)
@@ -515,15 +530,19 @@ func runDaemon(configPath string) error {
 	server.SetVersion(version)
 	executor.AddListener(server.EventListener())
 
-	warnIfNoAdminPassword(cfg, db, logger)
+	warnIfNoAdminPassword(ctx, cfg, db, logger)
 
 	if err := executor.Start(); err != nil {
 		return fmt.Errorf("starting executor: %w", err)
 	}
 
 	go func() {
-		if err := server.Start(cfg.Canarium.Host); err != nil {
-			logger.Error("API server error", "error", err)
+		// ErrServerClosed is the expected outcome of a graceful shutdown,
+		// not a failure. Logging it at error level made every clean stop
+		// look like a fault to whatever is watching the logs.
+		if err := server.Start(cfg.Canarium.Host); err != nil &&
+			!errors.Is(err, http.ErrServerClosed) {
+			logger.Error("API server stopped unexpectedly", "error", err)
 		}
 	}()
 
@@ -554,14 +573,14 @@ func runDaemon(configPath string) error {
 // been set. Until one is, every authenticated endpoint refuses requests and
 // the UI shows its first-run screen, so the daemon is not exposed — but the
 // operator needs to know the web UI is not yet usable.
-func warnIfNoAdminPassword(cfg *config.Config, db *state.DB, logger *slog.Logger) {
+func warnIfNoAdminPassword(ctx context.Context, cfg *config.Config, db *state.DB, logger *slog.Logger) {
 	if cfg.Canarium.Auth.PasswordHash != "" {
 		logger.Info("admin password is pinned by the configuration file; " +
 			"first-run setup is disabled")
 		return
 	}
 
-	hash, err := db.GetPasswordHash()
+	hash, err := db.GetPasswordHash(ctx)
 	if err != nil {
 		logger.Error("could not determine whether an admin password is set", "error", err)
 		return

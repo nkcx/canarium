@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,13 +46,13 @@ func tokenCmd(configPath *string) *cobra.Command {
 }
 
 // openStateDB opens the database a command needs, without starting anything.
-func openStateDB(configPath string) (*state.DB, error) {
+func openStateDB(ctx context.Context, configPath string) (*state.DB, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
 
-	db, err := state.Open(cfg.Canarium.DataDir)
+	db, err := state.Open(ctx, cfg.Canarium.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("opening state database at %s: %w", cfg.Canarium.DataDir, err)
 	}
@@ -80,11 +81,14 @@ func tokenCreateCmd(configPath *string) *cobra.Command {
 					scope, strings.Join(state.ValidScopes, ", "))
 			}
 
-			db, err := openStateDB(*configPath)
+			ctx := cmd.Context()
+
+			db, err := openStateDB(ctx, *configPath)
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			// Read-only command; a close error changes nothing for the caller.
+			defer func() { _ = db.Close() }()
 
 			raw := make([]byte, apiTokenBytes)
 			if _, err := rand.Read(raw); err != nil {
@@ -93,7 +97,7 @@ func tokenCreateCmd(configPath *string) *cobra.Command {
 			token := hex.EncodeToString(raw)
 
 			digest := sha256.Sum256([]byte(token))
-			if err := db.SaveAPIToken(hex.EncodeToString(digest[:]), name, scope); err != nil {
+			if err := db.SaveAPIToken(ctx, hex.EncodeToString(digest[:]), name, scope); err != nil {
 				if errors.Is(err, state.ErrTokenExists) {
 					return fmt.Errorf("a token named %q already exists; revoke it first", name)
 				}
@@ -121,13 +125,16 @@ func tokenListCmd(configPath *string) *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := openStateDB(*configPath)
+			ctx := cmd.Context()
+
+			db, err := openStateDB(ctx, *configPath)
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			// Read-only command; a close error changes nothing for the caller.
+			defer func() { _ = db.Close() }()
 
-			tokens, err := db.ListAPITokens()
+			tokens, err := db.ListAPITokens(ctx)
 			if err != nil {
 				return err
 			}
@@ -159,13 +166,16 @@ func tokenRevokeCmd(configPath *string) *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			db, err := openStateDB(*configPath)
+			ctx := cmd.Context()
+
+			db, err := openStateDB(ctx, *configPath)
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			// Read-only command; a close error changes nothing for the caller.
+			defer func() { _ = db.Close() }()
 
-			removed, err := db.DeleteAPIToken(args[0])
+			removed, err := db.DeleteAPIToken(ctx, args[0])
 			if err != nil {
 				return err
 			}

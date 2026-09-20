@@ -134,7 +134,7 @@ func TestSequenceRecordsConfigSnapshot(t *testing.T) {
 
 	h.runSequence("outage", 10*time.Second)
 
-	seq, err := h.db.LastSequence()
+	seq, err := h.db.LastSequence(t.Context())
 	if err != nil {
 		t.Fatalf("LastSequence: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestSequenceRecordsResolvedAddresses(t *testing.T) {
 
 	h.runSequence("outage", 10*time.Second)
 
-	seq, err := h.db.LastSequence()
+	seq, err := h.db.LastSequence(t.Context())
 	if err != nil {
 		t.Fatalf("LastSequence: %v", err)
 	}

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 // LoadDwellTrackers returns every persisted dwell tracker, keyed by condition.
 //
 // Implements conditions.DwellStore.
-func (d *DB) LoadDwellTrackers() (map[string]conditions.DwellRecord, error) {
-	rows, err := d.db.Query(
+func (d *DB) LoadDwellTrackers(ctx context.Context) (map[string]conditions.DwellRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
 		"SELECT condition_key, required_ns, elapsed_ns, satisfied, last_seen_at FROM dwell_trackers")
 	if err != nil {
 		return nil, fmt.Errorf("loading dwell trackers: %w", err)
@@ -41,8 +42,8 @@ func (d *DB) LoadDwellTrackers() (map[string]conditions.DwellRecord, error) {
 }
 
 // SaveDwellTracker writes a tracker's progress.
-func (d *DB) SaveDwellTracker(key string, rec conditions.DwellRecord) error {
-	_, err := d.db.Exec(`
+func (d *DB) SaveDwellTracker(ctx context.Context, key string, rec conditions.DwellRecord) error {
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO dwell_trackers (condition_key, required_ns, elapsed_ns, satisfied, last_seen_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(condition_key) DO UPDATE SET
@@ -58,8 +59,8 @@ func (d *DB) SaveDwellTracker(key string, rec conditions.DwellRecord) error {
 }
 
 // DeleteDwellTracker removes a tracker.
-func (d *DB) DeleteDwellTracker(key string) error {
-	if _, err := d.db.Exec("DELETE FROM dwell_trackers WHERE condition_key = ?", key); err != nil {
+func (d *DB) DeleteDwellTracker(ctx context.Context, key string) error {
+	if _, err := d.db.ExecContext(ctx, "DELETE FROM dwell_trackers WHERE condition_key = ?", key); err != nil {
 		return fmt.Errorf("deleting dwell tracker: %w", err)
 	}
 	return nil
@@ -67,8 +68,8 @@ func (d *DB) DeleteDwellTracker(key string) error {
 
 // PruneDwellTrackers removes trackers not seen since the given time. Used to
 // clean up after conditions are removed from the config.
-func (d *DB) PruneDwellTrackers(before time.Time) (int64, error) {
-	res, err := d.db.Exec("DELETE FROM dwell_trackers WHERE last_seen_at < ?", before.Unix())
+func (d *DB) PruneDwellTrackers(ctx context.Context, before time.Time) (int64, error) {
+	res, err := d.db.ExecContext(ctx, "DELETE FROM dwell_trackers WHERE last_seen_at < ?", before.Unix())
 	if err != nil {
 		return 0, fmt.Errorf("pruning dwell trackers: %w", err)
 	}

@@ -55,7 +55,7 @@ func (e *Executor) executeSequence(plan *config.PlanConfig) {
 // resumeSequence continues a sequence that was interrupted by a restart,
 // picking up at the first stage with no recorded completion.
 func (e *Executor) resumeSequence(as *ActiveSequence) {
-	completed, err := e.db.GetCompletedStages(as.ID())
+	completed, err := e.db.GetCompletedStages(e.ctx, as.ID())
 	if err != nil {
 		e.logger.Error("reading completed stages; resuming from the recorded stage",
 			"sequence", as.ID(), "error", err)
@@ -234,7 +234,7 @@ func (e *Executor) handleStageTimeout(as *ActiveSequence, stage *config.StageCon
 			Error:       "stage skipped: entry condition not met within wait_timeout",
 		}
 	}
-	if err := e.db.SaveStageRecord(record); err != nil {
+	if err := e.db.SaveStageRecord(e.ctx, record); err != nil {
 		e.logger.Error("persisting skipped stage record", "stage", stage.Name, "error", err)
 	}
 
@@ -323,7 +323,7 @@ func (e *Executor) executeStage(as *ActiveSequence, stage *config.StageConfig, s
 		StartedAt:  time.Now(),
 		Clients:    make(map[string]state.ClientResult, len(clients)),
 	}
-	if err := e.db.SaveStageRecord(record); err != nil {
+	if err := e.db.SaveStageRecord(e.ctx, record); err != nil {
 		e.logger.Error("persisting stage record", "stage", stage.Name, "error", err)
 	}
 
@@ -346,7 +346,7 @@ func (e *Executor) executeStage(as *ActiveSequence, stage *config.StageConfig, s
 
 	now := time.Now()
 	record.CompletedAt = &now
-	if err := e.db.SaveStageRecord(record); err != nil {
+	if err := e.db.SaveStageRecord(e.ctx, record); err != nil {
 		e.logger.Error("persisting stage completion", "stage", stage.Name, "error", err)
 	}
 }
@@ -381,13 +381,13 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 	// Claim the client so two sequences cannot act on it at once. The lock
 	// is re-entrant for the sequence that already holds it, so a resumed
 	// sequence reclaims its own locks rather than skipping every client.
-	acquired, err := e.db.AcquireClientLock(name, seqID)
+	acquired, err := e.db.AcquireClientLock(e.ctx, name, seqID)
 	if err != nil {
 		e.logger.Error("acquiring client lock", "client", name, "error", err)
 		return finish(StateFailed, "could not acquire client lock: "+err.Error())
 	}
 	if !acquired {
-		holder, _ := e.db.ClientLockHolder(name)
+		holder, _ := e.db.ClientLockHolder(e.ctx, name)
 		e.logger.Warn("client is locked by another sequence; skipping",
 			"client", name, "holder", holder)
 		return finish(e.GetClientState(name), "locked by sequence "+holder)
@@ -535,10 +535,7 @@ func (e *Executor) waitForShuttingDown(as *ActiveSequence) {
 func (e *Executor) runWake(as *ActiveSequence) {
 	plan := as.Plan()
 
-	for {
-		if e.evaluator.Evaluate(&plan.Wake.Gate, time.Now()) == facts.True {
-			break
-		}
+	for e.evaluator.Evaluate(&plan.Wake.Gate, time.Now()) != facts.True {
 		if !e.sleep(e.timings.WakeGatePoll) {
 			e.logger.Info("wake gate wait interrupted by shutdown", "sequence", as.ID())
 			e.clearActiveSequence()
@@ -626,7 +623,7 @@ func (e *Executor) completeSequence(as *ActiveSequence) {
 // was not re-entrant, every subsequent sequence then skipped those clients
 // with "locked by another sequence".
 func (e *Executor) releaseSequence(as *ActiveSequence) {
-	if err := e.db.ReleaseSequenceLocks(as.ID()); err != nil {
+	if err := e.db.ReleaseSequenceLocks(e.ctx, as.ID()); err != nil {
 		e.logger.Error("releasing client locks", "sequence", as.ID(), "error", err)
 	}
 	e.clearActiveSequence()
@@ -857,7 +854,7 @@ func (e *Executor) duration(value string, def time.Duration, field string, attrs
 }
 
 func (e *Executor) saveIntent(intent *state.Intent) {
-	if err := e.db.SaveIntent(intent); err != nil {
+	if err := e.db.SaveIntent(e.ctx, intent); err != nil {
 		e.logger.Error("persisting intent",
 			"client", intent.ClientName, "action", intent.Action, "error", err)
 	}

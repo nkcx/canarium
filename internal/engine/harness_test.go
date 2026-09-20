@@ -141,7 +141,7 @@ func testTimings() Timings {
 func newHarness(t *testing.T, cfg *config.Config) *harness {
 	t.Helper()
 
-	db, err := state.Open(t.TempDir())
+	db, err := state.Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatalf("opening state database: %v", err)
 	}
@@ -271,7 +271,7 @@ func (h *harness) lastSequenceID(t *testing.T) string {
 		return as.ID()
 	}
 
-	seq, err := h.db.LastSequence()
+	seq, err := h.db.LastSequence(t.Context())
 	if err != nil {
 		t.Fatalf("LastSequence: %v", err)
 	}

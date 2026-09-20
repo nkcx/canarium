@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -29,10 +30,10 @@ func (p PruneResult) Total() int64 {
 // never removed regardless of age: a long hold or a wake gate waiting on a
 // slowly recharging battery can legitimately outlive the retention window,
 // and deleting it would strand the executor's own resume state.
-func (d *DB) PruneJournal(before time.Time) (PruneResult, error) {
+func (d *DB) PruneJournal(ctx context.Context, before time.Time) (PruneResult, error) {
 	cutoff := before.Format(time.RFC3339Nano)
 
-	tx, err := d.db.Begin()
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("beginning retention transaction: %w", err)
 	}
@@ -47,7 +48,7 @@ func (d *DB) PruneJournal(before time.Time) (PruneResult, error) {
 
 	var result PruneResult
 
-	res, err := tx.Exec(
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM intents WHERE sequence_id IN (`+selectExpired+`)`, cutoff)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("pruning intents: %w", err)
@@ -56,7 +57,7 @@ func (d *DB) PruneJournal(before time.Time) (PruneResult, error) {
 		return PruneResult{}, fmt.Errorf("counting pruned intents: %w", err)
 	}
 
-	res, err = tx.Exec(
+	res, err = tx.ExecContext(ctx,
 		`DELETE FROM stage_records WHERE sequence_id IN (`+selectExpired+`)`, cutoff)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("pruning stage records: %w", err)
@@ -65,7 +66,7 @@ func (d *DB) PruneJournal(before time.Time) (PruneResult, error) {
 		return PruneResult{}, fmt.Errorf("counting pruned stage records: %w", err)
 	}
 
-	res, err = tx.Exec(
+	res, err = tx.ExecContext(ctx,
 		`DELETE FROM sequences
 		 WHERE started_at < ?
 		   AND state IN ('completed', 'failed', 'aborted')`, cutoff)
@@ -85,7 +86,7 @@ func (d *DB) PruneJournal(before time.Time) (PruneResult, error) {
 
 // CountJournalRows returns the current size of the journal tables, for tests
 // and diagnostics.
-func (d *DB) CountJournalRows() (PruneResult, error) {
+func (d *DB) CountJournalRows(ctx context.Context) (PruneResult, error) {
 	var out PruneResult
 
 	for _, q := range []struct {
@@ -96,7 +97,7 @@ func (d *DB) CountJournalRows() (PruneResult, error) {
 		{"intents", &out.Intents},
 		{"stage_records", &out.StageRecords},
 	} {
-		if err := d.db.QueryRow("SELECT COUNT(*) FROM " + q.table).Scan(q.dest); err != nil {
+		if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+q.table).Scan(q.dest); err != nil {
 			return PruneResult{}, fmt.Errorf("counting %s: %w", q.table, err)
 		}
 	}
@@ -109,8 +110,8 @@ func (d *DB) CountJournalRows() (PruneResult, error) {
 // SQLite does not return freed pages to the filesystem on its own, so
 // without this the database file only ever grows even as retention removes
 // rows from it.
-func (d *DB) Vacuum() error {
-	if _, err := d.db.Exec("VACUUM"); err != nil {
+func (d *DB) Vacuum(ctx context.Context) error {
+	if _, err := d.db.ExecContext(ctx, "VACUUM"); err != nil {
 		return fmt.Errorf("vacuuming database: %w", err)
 	}
 	return nil

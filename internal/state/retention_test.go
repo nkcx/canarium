@@ -20,11 +20,11 @@ func seedSequence(t *testing.T, db *DB, id, state string, startedAt time.Time) {
 		completed := startedAt.Add(time.Minute)
 		seq.CompletedAt = &completed
 	}
-	if err := db.SaveSequence(seq); err != nil {
+	if err := db.SaveSequence(t.Context(), seq); err != nil {
 		t.Fatalf("SaveSequence(%s): %v", id, err)
 	}
 
-	if err := db.SaveIntent(&Intent{
+	if err := db.SaveIntent(t.Context(), &Intent{
 		ID:         id + "-intent",
 		SequenceID: id,
 		ClientName: "nas",
@@ -36,7 +36,7 @@ func seedSequence(t *testing.T, db *DB, id, state string, startedAt time.Time) {
 	}
 
 	completed := startedAt.Add(time.Minute)
-	if err := db.SaveStageRecord(&StageRecord{
+	if err := db.SaveStageRecord(t.Context(), &StageRecord{
 		SequenceID:  id,
 		StageIndex:  0,
 		StageName:   "compute",
@@ -61,7 +61,7 @@ func TestPruneJournalRemovesOldFinishedSequences(t *testing.T) {
 	seedSequence(t, db, "old-3", "aborted", old)
 	seedSequence(t, db, "recent", "completed", recent)
 
-	result, err := db.PruneJournal(time.Now().Add(-30 * 24 * time.Hour))
+	result, err := db.PruneJournal(t.Context(), time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatalf("PruneJournal: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestPruneJournalRemovesOldFinishedSequences(t *testing.T) {
 		t.Errorf("pruned %d stage records, want 3", result.StageRecords)
 	}
 
-	counts, err := db.CountJournalRows()
+	counts, err := db.CountJournalRows(t.Context())
 	if err != nil {
 		t.Fatalf("CountJournalRows: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestPruneJournalKeepsInProgressSequences(t *testing.T) {
 		seedSequence(t, db, "inflight-"+state, state, old)
 	}
 
-	result, err := db.PruneJournal(time.Now().Add(-30 * 24 * time.Hour))
+	result, err := db.PruneJournal(t.Context(), time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatalf("PruneJournal: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestPruneJournalKeepsInProgressSequences(t *testing.T) {
 		t.Errorf("pruned %d rows belonging to in-progress sequences", result.Total())
 	}
 
-	counts, err := db.CountJournalRows()
+	counts, err := db.CountJournalRows(t.Context())
 	if err != nil {
 		t.Fatalf("CountJournalRows: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestPruneJournalKeepsInProgressSequences(t *testing.T) {
 func TestPruneJournalOnEmptyDatabase(t *testing.T) {
 	db := newTestDB(t)
 
-	result, err := db.PruneJournal(time.Now())
+	result, err := db.PruneJournal(t.Context(), time.Now())
 	if err != nil {
 		t.Fatalf("PruneJournal on an empty database: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestPruneJournalIsIdempotent(t *testing.T) {
 	seedSequence(t, db, "old", "completed", time.Now().Add(-60*24*time.Hour))
 	cutoff := time.Now().Add(-30 * 24 * time.Hour)
 
-	first, err := db.PruneJournal(cutoff)
+	first, err := db.PruneJournal(t.Context(), cutoff)
 	if err != nil {
 		t.Fatalf("first PruneJournal: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPruneJournalIsIdempotent(t *testing.T) {
 		t.Fatalf("first pass pruned %d sequences, want 1", first.Sequences)
 	}
 
-	second, err := db.PruneJournal(cutoff)
+	second, err := db.PruneJournal(t.Context(), cutoff)
 	if err != nil {
 		t.Fatalf("second PruneJournal: %v", err)
 	}
@@ -155,10 +155,10 @@ func TestVacuum(t *testing.T) {
 	db := newTestDB(t)
 
 	seedSequence(t, db, "old", "completed", time.Now().Add(-60*24*time.Hour))
-	if _, err := db.PruneJournal(time.Now()); err != nil {
+	if _, err := db.PruneJournal(t.Context(), time.Now()); err != nil {
 		t.Fatalf("PruneJournal: %v", err)
 	}
-	if err := db.Vacuum(); err != nil {
+	if err := db.Vacuum(t.Context()); err != nil {
 		t.Errorf("Vacuum: %v", err)
 	}
 }

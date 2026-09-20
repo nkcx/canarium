@@ -2,17 +2,18 @@ package state
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 )
 
 func TestMigrateIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 
-	first, err := Open(dir)
+	first, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	v1, err := first.SchemaVersion()
+	v1, err := first.SchemaVersion(t.Context())
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
@@ -21,13 +22,13 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 
 	// Reopening must not re-run migrations or fail.
-	second, err := Open(dir)
+	second, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
 	defer second.Close()
 
-	v2, err := second.SchemaVersion()
+	v2, err := second.SchemaVersion(t.Context())
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
@@ -37,13 +38,13 @@ func TestMigrateIsIdempotent(t *testing.T) {
 }
 
 func TestMigrateReachesLatestVersion(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
 
-	got, err := db.SchemaVersion()
+	got, err := db.SchemaVersion(t.Context())
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestMigrationVersionsAreSequentialAndUnique(t *testing.T) {
 // TestMigrateRecordsEveryMigration verifies the bookkeeping table matches the
 // declared history, so a partially applied upgrade is detectable.
 func TestMigrateRecordsEveryMigration(t *testing.T) {
-	db, err := Open(t.TempDir())
+	db, err := Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -115,11 +116,11 @@ func TestMigrateRecordsEveryMigration(t *testing.T) {
 func TestMigrationFailureIsAtomic(t *testing.T) {
 	dir := t.TempDir()
 
-	db, err := Open(dir)
+	db, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	before, err := db.SchemaVersion()
+	before, err := db.SchemaVersion(t.Context())
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestMigrationFailureIsAtomic(t *testing.T) {
 			`THIS IS NOT VALID SQL`,
 		},
 	}
-	if err := applyMigration(raw, bad); err == nil {
+	if err := applyMigration(t.Context(), raw, bad); err == nil {
 		t.Fatal("applyMigration accepted invalid SQL")
 	}
 
@@ -148,7 +149,7 @@ func TestMigrationFailureIsAtomic(t *testing.T) {
 	err = raw.QueryRow(
 		`SELECT name FROM sqlite_master WHERE type='table' AND name='should_not_survive'`,
 	).Scan(&name)
-	if err != sql.ErrNoRows {
+	if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("partial migration was committed: found table %q (err=%v)", name, err)
 	}
 
@@ -164,13 +165,13 @@ func TestMigrationFailureIsAtomic(t *testing.T) {
 
 	raw.Close()
 
-	reopened, err := Open(dir)
+	reopened, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("reopening after failed migration: %v", err)
 	}
 	defer reopened.Close()
 
-	after, err := reopened.SchemaVersion()
+	after, err := reopened.SchemaVersion(t.Context())
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}

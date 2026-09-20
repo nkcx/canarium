@@ -268,7 +268,7 @@ func sendPacket(broadcast string, port int, packet []byte) error {
 	if err != nil {
 		return fmt.Errorf("dialing UDP: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return fmt.Errorf("setting write deadline: %w", err)

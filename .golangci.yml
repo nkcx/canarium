@@ -1,38 +1,69 @@
 # golangci-lint configuration for Canarium.
 #
-# The enabled set is deliberately conservative: correctness and resource-leak
-# checks that catch the classes of bug this codebase has shipped before
-# (ignored errors, leaked contexts, unchecked type assertions), without
-# stylistic linters that would generate churn.
+# The enabled set is deliberately correctness-focused: the classes of bug this
+# codebase has actually shipped (ignored errors, unclosed resources, contexts
+# that go nowhere, dead code) rather than stylistic linters that generate
+# churn without catching anything.
+
+version: "2"
 
 run:
   timeout: 5m
 
 linters:
+  # errcheck, govet, ineffassign, staticcheck and unused are on by default.
   enable:
-    - errcheck      # unchecked error returns
-    - govet
-    - ineffassign   # assignments never read
-    - staticcheck
-    - unused        # dead code
-    - bodyclose     # unclosed HTTP response bodies
-    - contextcheck  # functions that should accept a context
-    - errorlint     # incorrect error comparison/wrapping
-    - noctx         # HTTP requests built without a context
-    - rowserrcheck  # unchecked sql.Rows.Err
-    - sqlclosecheck # unclosed sql.Rows / sql.Stmt
-    - nilerr        # returning nil after a non-nil error
+    - bodyclose      # unclosed HTTP response bodies
+    - contextcheck   # functions that drop the caller's context
+    - errorlint      # == on errors instead of errors.Is/As
+    - noctx          # HTTP requests built without a context
+    - rowserrcheck   # unchecked sql.Rows.Err
+    - sqlclosecheck  # unclosed sql.Rows / sql.Stmt
+    - nilerr         # returning nil after a non-nil error
+    - makezero       # append to a slice created with a non-zero length
+    - durationcheck  # multiplying two durations
+    - nilnil         # returning (nil, nil) from a constructor-shaped function
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: false
+  settings:
+    errcheck:
+      check-type-assertions: true
+
+      # Deferred Close on a resource being torn down, and writes to a
+      # terminal, carry no information a caller can act on. Errors that do
+      # carry information — closing the state database, flushing the last
+      # write of a command's output, encoding a response body — are checked
+      # explicitly in the code rather than hidden here.
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (*database/sql.Rows).Close
+        - (*os.File).Close
+        - (*golang.org/x/crypto/ssh.Session).Close
+        - (*golang.org/x/crypto/ssh.Client).Close
+        - (*github.com/gorilla/websocket.Conn).Close
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - os.Remove
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+  exclusions:
+    rules:
+      # Test helpers routinely ignore errors on setup and teardown.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+          - noctx
+
+      # Returning (nil, nil) is the documented contract for "no active
+      # sequence" and "no such session": callers distinguish absence from
+      # error, and collapsing them would lose that.
+      - path: internal/state/
+        linters:
+          - nilnil
 
 issues:
-  exclude-rules:
-    # Table-driven tests routinely ignore errors on setup helpers.
-    - path: _test\.go
-      linters:
-        - errcheck
   max-issues-per-linter: 0
   max-same-issues: 0

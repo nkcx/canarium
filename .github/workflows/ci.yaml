@@ -74,9 +74,11 @@ jobs:
           go-version: "1.26.8"
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.64
+          # v2 is required: earlier releases are built against Go 1.24 and
+          # refuse to analyse a module targeting a newer language version.
+          version: v2.13.2
 
   build-image:
     runs-on: ubuntu-latest

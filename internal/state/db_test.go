@@ -9,7 +9,7 @@ import (
 func testDB(t *testing.T) *DB {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("opening db: %v", err)
 	}
@@ -27,12 +27,12 @@ func TestOpenAndMigrate(t *testing.T) {
 func TestClientStateRoundtrip(t *testing.T) {
 	db := testDB(t)
 
-	err := db.SaveClientState("alpha", "up", nil)
+	err := db.SaveClientState(t.Context(), "alpha", "up", nil)
 	if err != nil {
 		t.Fatalf("saving client state: %v", err)
 	}
 
-	state, err := db.GetClientState("alpha")
+	state, err := db.GetClientState(t.Context(), "alpha")
 	if err != nil {
 		t.Fatalf("getting client state: %v", err)
 	}
@@ -44,10 +44,10 @@ func TestClientStateRoundtrip(t *testing.T) {
 func TestClientStateUpdate(t *testing.T) {
 	db := testDB(t)
 
-	db.SaveClientState("beta", "up", nil)
-	db.SaveClientState("beta", "shutting_down", nil)
+	db.SaveClientState(t.Context(), "beta", "up", nil)
+	db.SaveClientState(t.Context(), "beta", "shutting_down", nil)
 
-	state, _ := db.GetClientState("beta")
+	state, _ := db.GetClientState(t.Context(), "beta")
 	if state != "shutting_down" {
 		t.Errorf("state = %s, want shutting_down", state)
 	}
@@ -56,7 +56,7 @@ func TestClientStateUpdate(t *testing.T) {
 func TestClientStateUnknownDefault(t *testing.T) {
 	db := testDB(t)
 
-	state, err := db.GetClientState("nonexistent")
+	state, err := db.GetClientState(t.Context(), "nonexistent")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -68,10 +68,10 @@ func TestClientStateUnknownDefault(t *testing.T) {
 func TestGetAllClientStates(t *testing.T) {
 	db := testDB(t)
 
-	db.SaveClientState("a", "up", nil)
-	db.SaveClientState("b", "down", nil)
+	db.SaveClientState(t.Context(), "a", "up", nil)
+	db.SaveClientState(t.Context(), "b", "down", nil)
 
-	states, err := db.GetAllClientStates()
+	states, err := db.GetAllClientStates(t.Context())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -96,12 +96,12 @@ func TestSequenceRoundtrip(t *testing.T) {
 		PreSequenceState: map[string]string{"alpha": "up"},
 	}
 
-	err := db.SaveSequence(seq)
+	err := db.SaveSequence(t.Context(), seq)
 	if err != nil {
 		t.Fatalf("saving sequence: %v", err)
 	}
 
-	loaded, err := db.GetActiveSequence()
+	loaded, err := db.GetActiveSequence(t.Context())
 	if err != nil {
 		t.Fatalf("getting active sequence: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSequenceRoundtrip(t *testing.T) {
 func TestNoActiveSequence(t *testing.T) {
 	db := testDB(t)
 
-	seq, err := db.GetActiveSequence()
+	seq, err := db.GetActiveSequence(t.Context())
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -142,9 +142,9 @@ func TestCompletedSequenceNotActive(t *testing.T) {
 		StartedAt:   now.Add(-10 * time.Minute),
 		CompletedAt: &now,
 	}
-	db.SaveSequence(seq)
+	db.SaveSequence(t.Context(), seq)
 
-	active, _ := db.GetActiveSequence()
+	active, _ := db.GetActiveSequence(t.Context())
 	if active != nil {
 		t.Error("completed sequence should not be returned as active")
 	}
@@ -153,7 +153,7 @@ func TestCompletedSequenceNotActive(t *testing.T) {
 func TestClientLocks(t *testing.T) {
 	db := testDB(t)
 
-	ok, err := db.AcquireClientLock("alpha", "seq_1")
+	ok, err := db.AcquireClientLock(t.Context(), "alpha", "seq_1")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -161,13 +161,13 @@ func TestClientLocks(t *testing.T) {
 		t.Error("first acquire should succeed")
 	}
 
-	ok, _ = db.AcquireClientLock("alpha", "seq_2")
+	ok, _ = db.AcquireClientLock(t.Context(), "alpha", "seq_2")
 	if ok {
 		t.Error("second acquire should fail (locked)")
 	}
 
-	db.ReleaseClientLock("alpha")
-	ok, _ = db.AcquireClientLock("alpha", "seq_2")
+	db.ReleaseClientLock(t.Context(), "alpha")
+	ok, _ = db.AcquireClientLock(t.Context(), "alpha", "seq_2")
 	if !ok {
 		t.Error("acquire after release should succeed")
 	}
@@ -176,17 +176,17 @@ func TestClientLocks(t *testing.T) {
 func TestReleaseSequenceLocks(t *testing.T) {
 	db := testDB(t)
 
-	db.AcquireClientLock("a", "seq_1")
-	db.AcquireClientLock("b", "seq_1")
-	db.AcquireClientLock("c", "seq_2")
+	db.AcquireClientLock(t.Context(), "a", "seq_1")
+	db.AcquireClientLock(t.Context(), "b", "seq_1")
+	db.AcquireClientLock(t.Context(), "c", "seq_2")
 
-	db.ReleaseSequenceLocks("seq_1")
+	db.ReleaseSequenceLocks(t.Context(), "seq_1")
 
-	ok, _ := db.AcquireClientLock("a", "seq_3")
+	ok, _ := db.AcquireClientLock(t.Context(), "a", "seq_3")
 	if !ok {
 		t.Error("a should be unlocked after sequence release")
 	}
-	ok, _ = db.AcquireClientLock("c", "seq_3")
+	ok, _ = db.AcquireClientLock(t.Context(), "c", "seq_3")
 	if ok {
 		t.Error("c should still be locked (different sequence)")
 	}
@@ -201,7 +201,7 @@ func TestIntentRoundtrip(t *testing.T) {
 		State:     "shutting_down",
 		StartedAt: time.Now(),
 	}
-	db.SaveSequence(seq)
+	db.SaveSequence(t.Context(), seq)
 
 	intent := &Intent{
 		ID:         "int_1",
@@ -212,14 +212,14 @@ func TestIntentRoundtrip(t *testing.T) {
 		Status:     "dispatching",
 	}
 
-	err := db.SaveIntent(intent)
+	err := db.SaveIntent(t.Context(), intent)
 	if err != nil {
 		t.Fatalf("saving intent: %v", err)
 	}
 
 	intent.Status = "dispatched"
 	intent.Result = &ActionResult{Success: true, Message: "ok"}
-	err = db.SaveIntent(intent)
+	err = db.SaveIntent(t.Context(), intent)
 	if err != nil {
 		t.Fatalf("updating intent: %v", err)
 	}
@@ -228,12 +228,12 @@ func TestIntentRoundtrip(t *testing.T) {
 func TestKV(t *testing.T) {
 	db := testDB(t)
 
-	err := db.SetKV("mode", "armed")
+	err := db.SetKV(t.Context(), "mode", "armed")
 	if err != nil {
 		t.Fatalf("setting kv: %v", err)
 	}
 
-	val, err := db.GetKV("mode")
+	val, err := db.GetKV(t.Context(), "mode")
 	if err != nil {
 		t.Fatalf("getting kv: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestKV(t *testing.T) {
 		t.Errorf("kv = %s, want armed", val)
 	}
 
-	val, _ = db.GetKV("nonexistent")
+	val, _ = db.GetKV(t.Context(), "nonexistent")
 	if val != "" {
 		t.Errorf("nonexistent kv = %s, want empty", val)
 	}
@@ -250,13 +250,13 @@ func TestKV(t *testing.T) {
 func TestPasswordHash(t *testing.T) {
 	db := testDB(t)
 
-	hash, _ := db.GetPasswordHash()
+	hash, _ := db.GetPasswordHash(t.Context())
 	if hash != "" {
 		t.Error("initial hash should be empty")
 	}
 
-	db.SetPasswordHash("abc123hash")
-	hash, _ = db.GetPasswordHash()
+	db.SetPasswordHash(t.Context(), "abc123hash")
+	hash, _ = db.GetPasswordHash(t.Context())
 	if hash != "abc123hash" {
 		t.Errorf("hash = %s, want abc123hash", hash)
 	}
@@ -265,9 +265,9 @@ func TestPasswordHash(t *testing.T) {
 func TestAPIToken(t *testing.T) {
 	db := testDB(t)
 
-	db.SaveAPIToken("hash123", "test-token", "read")
+	db.SaveAPIToken(t.Context(), "hash123", "test-token", "read")
 
-	scope, err := db.ValidateAPIToken("hash123")
+	scope, err := db.ValidateAPIToken(t.Context(), "hash123")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestAPIToken(t *testing.T) {
 		t.Errorf("scope = %s, want read", scope)
 	}
 
-	scope, _ = db.ValidateAPIToken("nonexistent")
+	scope, _ = db.ValidateAPIToken(t.Context(), "nonexistent")
 	if scope != "" {
 		t.Errorf("invalid token scope = %s, want empty", scope)
 	}
@@ -285,7 +285,7 @@ func TestStageRecords(t *testing.T) {
 	db := testDB(t)
 
 	seq := &Sequence{ID: "seq_1", PlanName: "outage", State: "shutting_down", StartedAt: time.Now()}
-	db.SaveSequence(seq)
+	db.SaveSequence(t.Context(), seq)
 
 	now := time.Now()
 	rec := &StageRecord{
@@ -295,9 +295,9 @@ func TestStageRecords(t *testing.T) {
 		StartedAt:   now,
 		CompletedAt: &now,
 	}
-	db.SaveStageRecord(rec)
+	db.SaveStageRecord(t.Context(), rec)
 
-	completed, err := db.GetCompletedStages("seq_1")
+	completed, err := db.GetCompletedStages(t.Context(), "seq_1")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestDBInTempDir(t *testing.T) {
 	dir := t.TempDir()
 	subdir := dir + "/sub/dir"
 
-	db, err := Open(subdir)
+	db, err := Open(t.Context(), subdir)
 	if err != nil {
 		t.Fatalf("opening db in nested dir: %v", err)
 	}

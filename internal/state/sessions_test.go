@@ -7,7 +7,7 @@ import (
 
 func newTestDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir())
+	db, err := Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatalf("opening database: %v", err)
 	}
@@ -19,11 +19,11 @@ func TestSessionRoundTrip(t *testing.T) {
 	db := newTestDB(t)
 
 	const hash = "deadbeef"
-	if err := db.CreateSession(hash, time.Hour); err != nil {
+	if err := db.CreateSession(t.Context(), hash, time.Hour); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	valid, err := db.SessionIsValid(hash)
+	valid, err := db.SessionIsValid(t.Context(), hash)
 	if err != nil {
 		t.Fatalf("SessionIsValid: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestSessionRoundTrip(t *testing.T) {
 func TestUnknownSessionIsInvalid(t *testing.T) {
 	db := newTestDB(t)
 
-	valid, err := db.SessionIsValid("never-created")
+	valid, err := db.SessionIsValid(t.Context(), "never-created")
 	if err != nil {
 		t.Fatalf("SessionIsValid: %v", err)
 	}
@@ -48,11 +48,11 @@ func TestExpiredSessionIsInvalid(t *testing.T) {
 	db := newTestDB(t)
 
 	const hash = "expired"
-	if err := db.CreateSession(hash, -time.Minute); err != nil {
+	if err := db.CreateSession(t.Context(), hash, -time.Minute); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	valid, err := db.SessionIsValid(hash)
+	valid, err := db.SessionIsValid(t.Context(), hash)
 	if err != nil {
 		t.Fatalf("SessionIsValid: %v", err)
 	}
@@ -65,14 +65,14 @@ func TestDeleteSession(t *testing.T) {
 	db := newTestDB(t)
 
 	const hash = "to-delete"
-	if err := db.CreateSession(hash, time.Hour); err != nil {
+	if err := db.CreateSession(t.Context(), hash, time.Hour); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := db.DeleteSession(hash); err != nil {
+	if err := db.DeleteSession(t.Context(), hash); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	valid, err := db.SessionIsValid(hash)
+	valid, err := db.SessionIsValid(t.Context(), hash)
 	if err != nil {
 		t.Fatalf("SessionIsValid: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestDeleteSession(t *testing.T) {
 	}
 
 	// Deleting again must not error; logout is idempotent.
-	if err := db.DeleteSession(hash); err != nil {
+	if err := db.DeleteSession(t.Context(), hash); err != nil {
 		t.Errorf("second DeleteSession: %v", err)
 	}
 }
@@ -101,12 +101,12 @@ func TestDeleteExpiredSessionsPrunesOnlyExpired(t *testing.T) {
 		{"dead-2", -time.Minute},
 		{"dead-3", -time.Second},
 	} {
-		if err := db.CreateSession(s.hash, s.ttl); err != nil {
+		if err := db.CreateSession(t.Context(), s.hash, s.ttl); err != nil {
 			t.Fatalf("CreateSession %d: %v", i, err)
 		}
 	}
 
-	pruned, err := db.DeleteExpiredSessions()
+	pruned, err := db.DeleteExpiredSessions(t.Context())
 	if err != nil {
 		t.Fatalf("DeleteExpiredSessions: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestDeleteExpiredSessionsPrunesOnlyExpired(t *testing.T) {
 		t.Errorf("pruned %d sessions, want 3", pruned)
 	}
 
-	remaining, err := db.CountSessions()
+	remaining, err := db.CountSessions(t.Context())
 	if err != nil {
 		t.Fatalf("CountSessions: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestDeleteExpiredSessionsPrunesOnlyExpired(t *testing.T) {
 	}
 
 	for _, hash := range []string{"live-1", "live-2"} {
-		valid, err := db.SessionIsValid(hash)
+		valid, err := db.SessionIsValid(t.Context(), hash)
 		if err != nil {
 			t.Fatalf("SessionIsValid(%q): %v", hash, err)
 		}
@@ -137,12 +137,12 @@ func TestDeleteAllSessions(t *testing.T) {
 	db := newTestDB(t)
 
 	for _, hash := range []string{"a", "b", "c"} {
-		if err := db.CreateSession(hash, time.Hour); err != nil {
+		if err := db.CreateSession(t.Context(), hash, time.Hour); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
 	}
 
-	n, err := db.DeleteAllSessions()
+	n, err := db.DeleteAllSessions(t.Context())
 	if err != nil {
 		t.Fatalf("DeleteAllSessions: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestDeleteAllSessions(t *testing.T) {
 		t.Errorf("deleted %d sessions, want 3", n)
 	}
 
-	count, err := db.CountSessions()
+	count, err := db.CountSessions(t.Context())
 	if err != nil {
 		t.Fatalf("CountSessions: %v", err)
 	}
@@ -163,14 +163,14 @@ func TestCreateSessionIsIdempotentPerToken(t *testing.T) {
 	db := newTestDB(t)
 
 	const hash = "reused"
-	if err := db.CreateSession(hash, time.Hour); err != nil {
+	if err := db.CreateSession(t.Context(), hash, time.Hour); err != nil {
 		t.Fatalf("first CreateSession: %v", err)
 	}
-	if err := db.CreateSession(hash, 2*time.Hour); err != nil {
+	if err := db.CreateSession(t.Context(), hash, 2*time.Hour); err != nil {
 		t.Fatalf("second CreateSession: %v", err)
 	}
 
-	count, err := db.CountSessions()
+	count, err := db.CountSessions(t.Context())
 	if err != nil {
 		t.Fatalf("CountSessions: %v", err)
 	}

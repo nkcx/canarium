@@ -222,7 +222,7 @@ func (s *Server) reapExpiredSessions() {
 	defer ticker.Stop()
 
 	prune := func() {
-		n, err := s.db.DeleteExpiredSessions()
+		n, err := s.db.DeleteExpiredSessions(s.ctx)
 		if err != nil {
 			s.logger.Error("pruning expired sessions", "error", err)
 			return
@@ -245,7 +245,7 @@ func (s *Server) reapExpiredSessions() {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	s.writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"mode":    s.executor.Mode().String(),
 		"version": s.version,
@@ -267,7 +267,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		clients[name] = st.String()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	s.writeJSON(w, http.StatusOK, map[string]any{
 		"mode":     s.executor.Mode().String(),
 		"sequence": seqData,
 		"clients":  clients,
@@ -304,7 +304,7 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 		result[key] = info
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	s.writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -336,7 +336,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 			State:       s.executor.GetClientState(c.Name).String(),
 		})
 	}
-	writeJSON(w, http.StatusOK, clients)
+	s.writeJSON(w, http.StatusOK, clients)
 }
 
 func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
@@ -352,16 +352,16 @@ func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
 			Stages: len(p.Shutdown.Stages),
 		})
 	}
-	writeJSON(w, http.StatusOK, plans)
+	s.writeJSON(w, http.StatusOK, plans)
 }
 
 func (s *Server) handleSequence(w http.ResponseWriter, r *http.Request) {
 	seq := s.executor.ActiveSequence()
 	if seq == nil {
-		writeJSON(w, http.StatusOK, nil)
+		s.writeJSON(w, http.StatusOK, nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, seq.Snapshot())
+	s.writeJSON(w, http.StatusOK, seq.Snapshot())
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +369,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	// that the next deploy would silently revert is exactly the drift this
 	// setting exists to prevent.
 	if s.cfg.Canarium.ConfigReadonly {
-		writeJSON(w, http.StatusConflict, map[string]string{
+		s.writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "config_readonly is set; change canarium.mode in the " +
 				"configuration file and restart",
 		})
@@ -380,7 +380,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		Mode string `json:"mode"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
@@ -388,7 +388,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	// would quietly turn a typo into a disarmed system.
 	mode, ok := engine.ParseModeStrict(req.Mode)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "invalid mode " + req.Mode + " (expected disarmed, dry-run or armed)",
 		})
 		return
@@ -397,7 +397,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	previous := s.executor.Mode()
 	s.executor.SetMode(mode)
 
-	if err := s.db.SetKV("mode", mode.String()); err != nil {
+	if err := s.db.SetKV(r.Context(), "mode", mode.String()); err != nil {
 		s.logger.Error("persisting mode", "error", err)
 	}
 
@@ -405,7 +405,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		"from", previous.String(), "to", mode.String(),
 		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders))
 
-	writeJSON(w, http.StatusOK, map[string]string{"mode": mode.String()})
+	s.writeJSON(w, http.StatusOK, map[string]string{"mode": mode.String()})
 }
 
 func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
@@ -421,14 +421,14 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.executor.AbortSequence(reason); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 
 	s.logger.Info("abort requested via API",
 		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
 
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "abort requested"})
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "abort requested"})
 }
 
 // handleProceed releases a stage that is holding on an entry condition which
@@ -446,14 +446,14 @@ func (s *Server) handleProceed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.executor.ForceStage(reason); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
 
 	s.logger.Warn("operator forced the current stage to proceed",
 		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
 
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "proceed requested"})
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "proceed requested"})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -463,7 +463,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("login attempt refused; source is locked out",
 			"source", source, "retry_after", retryAfter.Round(time.Second))
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+		s.writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "too many failed attempts; try again later",
 		})
 		return
@@ -473,18 +473,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
-	storedHash, err := s.passwordHash()
+	storedHash, err := s.passwordHash(r.Context())
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	if storedHash == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
+		s.writeJSON(w, http.StatusUnauthorized, map[string]any{
 			"error":          "setup required",
 			"setup_required": true,
 		})
@@ -505,7 +505,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 		}
 
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
+		s.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 		return
 	}
 
@@ -517,7 +517,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if needsUpgrade && !s.passwordIsPinned() {
 		if upgraded, err := hashPassword(req.Password); err != nil {
 			s.logger.Error("re-hashing legacy password", "error", err)
-		} else if err := s.db.SetPasswordHash(upgraded); err != nil {
+		} else if err := s.db.SetPasswordHash(r.Context(), upgraded); err != nil {
 			s.logger.Error("storing upgraded password hash", "error", err)
 		} else {
 			s.logger.Info("upgraded stored password hash from legacy SHA-256 to bcrypt")
@@ -527,19 +527,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token, err := newSessionToken()
 	if err != nil {
 		s.logger.Error("generating session token", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
 	http.SetCookie(w, s.sessionCookie(r, token, int(sessionTTL.Seconds())))
 
-	if err := s.db.CreateSession(hashToken(token), sessionTTL); err != nil {
+	if err := s.db.CreateSession(r.Context(), hashToken(token), sessionTTL); err != nil {
 		s.logger.Error("persisting session", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleLogout invalidates the caller's session and clears the cookie.
@@ -549,14 +549,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // and there is nothing to protect.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
-		if err := s.db.DeleteSession(hashToken(cookie.Value)); err != nil {
+		if err := s.db.DeleteSession(r.Context(), hashToken(cookie.Value)); err != nil {
 			s.logger.Error("deleting session", "error", err)
 		}
 	}
 
 	// MaxAge < 0 instructs the browser to delete the cookie immediately.
 	http.SetCookie(w, s.sessionCookie(r, "", -1))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // sessionCookie builds the session cookie with the security attributes
@@ -601,11 +601,11 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 // immutable deployment with an ephemeral database does not present a
 // first-run setup screen — and a window in which anyone could claim it —
 // on every restart.
-func (s *Server) passwordHash() (string, error) {
+func (s *Server) passwordHash(ctx context.Context) (string, error) {
 	if pinned := strings.TrimSpace(s.cfg.Canarium.Auth.PasswordHash); pinned != "" {
 		return pinned, nil
 	}
-	return s.db.GetPasswordHash()
+	return s.db.GetPasswordHash(ctx)
 }
 
 func (s *Server) passwordIsPinned() bool {
@@ -614,20 +614,20 @@ func (s *Server) passwordIsPinned() bool {
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if s.passwordIsPinned() {
-		writeJSON(w, http.StatusForbidden, map[string]string{
+		s.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "the admin password is set in the configuration file",
 		})
 		return
 	}
 
-	existing, err := s.db.GetPasswordHash()
+	existing, err := s.db.GetPasswordHash(r.Context())
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	if existing != "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "password already set"})
+		s.writeJSON(w, http.StatusForbidden, map[string]string{"error": "password already set"})
 		return
 	}
 
@@ -635,12 +635,12 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
 	if len(req.Password) < MinPasswordLength {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("password must be at least %d characters", MinPasswordLength),
 		})
 		return
@@ -649,37 +649,31 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	hash, err := hashPassword(req.Password)
 	if err != nil {
 		s.logger.Error("hashing password", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	if err := s.db.SetPasswordHash(hash); err != nil {
+	if err := s.db.SetPasswordHash(r.Context(), hash); err != nil {
 		s.logger.Error("saving password hash", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save password"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save password"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// requireAuth wraps a handler so that it is reachable only by an
-// authenticated caller.
-//
-// This fails closed. An earlier version admitted every request when no
-// password had been configured, on the assumption that an operator would set
-// one during first-run setup. Combined with a web UI that could not reach
-// the setup endpoint, that left the entire API — including the endpoint that
-// arms the executor — permanently open on a default install.
-//
-// A fresh install with no password therefore rejects every authenticated
-// endpoint and reports setupRequired, which is what drives the UI to the
-// first-run screen. /api/auth/status and /api/auth/setup stay open so that
-// bootstrap is possible; setup itself refuses once a password exists.
-func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return s.requireScope(state.ScopeAdmin, next)
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // requireScope wraps a handler so it is reachable only by a caller holding at
 // least the given scope.
+//
+// This fails closed. An earlier version admitted every request when no
+// password had been configured, on the assumption that an operator would set
+// one during first-run setup. Combined with a web UI that could not reach the
+// setup endpoint, that left the entire API — including the endpoint that arms
+// the executor — permanently open on a default install.
+//
+// A fresh install with no password rejects every authenticated endpoint and
+// reports setupRequired, which is what drives the UI to its first-run screen.
+// /api/auth/status and /api/auth/setup stay open so bootstrap is possible;
+// setup itself refuses once a password exists.
 //
 // Session cookies carry admin scope: the single local admin is the operator.
 // API tokens carry whatever scope they were issued with, so a monitoring
@@ -687,31 +681,36 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // abort a sequence.
 func (s *Server) requireScope(required string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		storedHash, err := s.passwordHash()
+		// Database work runs under the request context: a client that
+		// disconnects mid-request stops the query behind it, and a slow
+		// database cannot pin a handler goroutine after the caller has gone.
+		ctx := r.Context()
+
+		storedHash, err := s.passwordHash(ctx)
 		if err != nil {
 			s.logger.Error("reading password hash", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
 
 		if storedHash == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
+			s.writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error":          "setup required",
 				"setup_required": true,
 			})
 			return
 		}
 
-		scope, ok := s.authenticate(r)
+		scope, ok := s.authenticate(ctx, r)
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			s.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 
 		if !scopeAllows(scope, required) {
 			s.logger.Warn("rejecting a request outside the credential's scope",
 				"path", r.URL.Path, "have", scope, "need", required)
-			writeJSON(w, http.StatusForbidden, map[string]string{
+			s.writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "this credential has " + scope + " scope; " + required + " is required",
 			})
 			return
@@ -734,9 +733,10 @@ func scopeAllows(held, required string) bool {
 // distinguishing "no credential", "unknown credential" and "expired
 // credential" to the caller would let an unauthenticated client probe for
 // valid tokens.
-func (s *Server) authenticate(r *http.Request) (scope string, ok bool) {
+func (s *Server) authenticate(ctx context.Context, r *http.Request) (scope string, ok bool) {
+
 	if token := bearerToken(r); token != "" {
-		scope, err := s.db.ValidateAPIToken(hashToken(token))
+		scope, err := s.db.ValidateAPIToken(ctx, hashToken(token))
 		if err != nil {
 			s.logger.Error("validating API token", "error", err)
 			return "", false
@@ -751,7 +751,7 @@ func (s *Server) authenticate(r *http.Request) (scope string, ok bool) {
 		return "", false
 	}
 
-	valid, err := s.db.SessionIsValid(hashToken(cookie.Value))
+	valid, err := s.db.SessionIsValid(ctx, hashToken(cookie.Value))
 	if err != nil {
 		s.logger.Error("validating session", "error", err)
 		return "", false
@@ -785,10 +785,12 @@ func bearerToken(r *http.Request) string {
 // It reveals only whether a password exists, which is not sensitive and is
 // already implied by the behaviour of every other endpoint.
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	storedHash, err := s.passwordHash()
+	ctx := r.Context()
+
+	storedHash, err := s.passwordHash(ctx)
 	if err != nil {
 		s.logger.Error("reading password hash", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
@@ -797,10 +799,10 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	var authenticated bool
 	var scope string
 	if !setupRequired {
-		scope, authenticated = s.authenticate(r)
+		scope, authenticated = s.authenticate(ctx, r)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	s.writeJSON(w, http.StatusOK, map[string]any{
 		"setup_required":      setupRequired,
 		"authenticated":       authenticated,
 		"scope":               scope,
@@ -810,10 +812,19 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, data any) {
+// writeJSON renders a response body.
+//
+// An encoding failure part way through leaves the client holding a truncated
+// document with a success status already sent — the header is long gone by
+// then, so there is nothing to do but record it. Silently discarding the
+// error made that indistinguishable from a healthy response.
+func (s *Server) writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		s.logger.Error("writing response body", "status", status, "error", err)
+	}
 }
 
 func hashToken(token string) string {

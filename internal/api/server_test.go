@@ -27,7 +27,7 @@ const testPassword = "a-sufficiently-long-password"
 func newTestServer(t *testing.T) (*Server, *state.DB) {
 	t.Helper()
 
-	db, err := state.Open(t.TempDir())
+	db, err := state.Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatalf("opening state database: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Errorf("replayed session after logout: got %d, want 401", rec.Code)
 	}
 
-	count, err := db.CountSessions()
+	count, err := db.CountSessions(t.Context())
 	if err != nil {
 		t.Fatalf("CountSessions: %v", err)
 	}
@@ -437,7 +437,7 @@ func issueToken(t *testing.T, db *state.DB, name, scope string) string {
 	t.Helper()
 
 	token := "test-token-" + name
-	if err := db.SaveAPIToken(hashToken(token), name, scope); err != nil {
+	if err := db.SaveAPIToken(t.Context(), hashToken(token), name, scope); err != nil {
 		t.Fatalf("SaveAPIToken: %v", err)
 	}
 	return token
@@ -536,7 +536,7 @@ func TestRevokedTokenIsRejected(t *testing.T) {
 		t.Fatalf("token did not work before revocation: %d", rec.Code)
 	}
 
-	removed, err := db.DeleteAPIToken("temporary")
+	removed, err := db.DeleteAPIToken(t.Context(), "temporary")
 	if err != nil || !removed {
 		t.Fatalf("DeleteAPIToken: removed=%v err=%v", removed, err)
 	}

@@ -5,7 +5,7 @@ import "testing"
 func TestAcquireClientLock(t *testing.T) {
 	db := newTestDB(t)
 
-	ok, err := db.AcquireClientLock("nas", "seq-1")
+	ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-1")
 	if err != nil {
 		t.Fatalf("AcquireClientLock: %v", err)
 	}
@@ -17,11 +17,11 @@ func TestAcquireClientLock(t *testing.T) {
 func TestClientLockExcludesOtherSequences(t *testing.T) {
 	db := newTestDB(t)
 
-	if ok, err := db.AcquireClientLock("nas", "seq-1"); err != nil || !ok {
+	if ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-1"); err != nil || !ok {
 		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
 	}
 
-	ok, err := db.AcquireClientLock("nas", "seq-2")
+	ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-2")
 	if err != nil {
 		t.Fatalf("AcquireClientLock: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestClientLockExcludesOtherSequences(t *testing.T) {
 		t.Error("a second sequence acquired a lock already held by another")
 	}
 
-	holder, err := db.ClientLockHolder("nas")
+	holder, err := db.ClientLockHolder(t.Context(), "nas")
 	if err != nil {
 		t.Fatalf("ClientLockHolder: %v", err)
 	}
@@ -46,11 +46,11 @@ func TestClientLockExcludesOtherSequences(t *testing.T) {
 func TestClientLockIsReentrantForSameSequence(t *testing.T) {
 	db := newTestDB(t)
 
-	if ok, err := db.AcquireClientLock("nas", "seq-1"); err != nil || !ok {
+	if ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-1"); err != nil || !ok {
 		t.Fatalf("first acquire: ok=%v err=%v", ok, err)
 	}
 
-	ok, err := db.AcquireClientLock("nas", "seq-1")
+	ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-1")
 	if err != nil {
 		t.Fatalf("re-acquire: %v", err)
 	}
@@ -62,14 +62,14 @@ func TestClientLockIsReentrantForSameSequence(t *testing.T) {
 func TestReleaseClientLock(t *testing.T) {
 	db := newTestDB(t)
 
-	if ok, err := db.AcquireClientLock("nas", "seq-1"); err != nil || !ok {
+	if ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-1"); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
-	if err := db.ReleaseClientLock("nas"); err != nil {
+	if err := db.ReleaseClientLock(t.Context(), "nas"); err != nil {
 		t.Fatalf("ReleaseClientLock: %v", err)
 	}
 
-	ok, err := db.AcquireClientLock("nas", "seq-2")
+	ok, err := db.AcquireClientLock(t.Context(), "nas", "seq-2")
 	if err != nil {
 		t.Fatalf("AcquireClientLock: %v", err)
 	}
@@ -82,21 +82,21 @@ func TestReleaseSequenceLocksReleasesAll(t *testing.T) {
 	db := newTestDB(t)
 
 	for _, name := range []string{"nas", "hypervisor", "firewall"} {
-		if ok, err := db.AcquireClientLock(name, "seq-1"); err != nil || !ok {
+		if ok, err := db.AcquireClientLock(t.Context(), name, "seq-1"); err != nil || !ok {
 			t.Fatalf("acquire %s: ok=%v err=%v", name, ok, err)
 		}
 	}
 	// A lock held by a different sequence must survive.
-	if ok, err := db.AcquireClientLock("other", "seq-2"); err != nil || !ok {
+	if ok, err := db.AcquireClientLock(t.Context(), "other", "seq-2"); err != nil || !ok {
 		t.Fatalf("acquire other: ok=%v err=%v", ok, err)
 	}
 
-	if err := db.ReleaseSequenceLocks("seq-1"); err != nil {
+	if err := db.ReleaseSequenceLocks(t.Context(), "seq-1"); err != nil {
 		t.Fatalf("ReleaseSequenceLocks: %v", err)
 	}
 
 	for _, name := range []string{"nas", "hypervisor", "firewall"} {
-		holder, err := db.ClientLockHolder(name)
+		holder, err := db.ClientLockHolder(t.Context(), name)
 		if err != nil {
 			t.Fatalf("ClientLockHolder(%s): %v", name, err)
 		}
@@ -105,7 +105,7 @@ func TestReleaseSequenceLocksReleasesAll(t *testing.T) {
 		}
 	}
 
-	holder, err := db.ClientLockHolder("other")
+	holder, err := db.ClientLockHolder(t.Context(), "other")
 	if err != nil {
 		t.Fatalf("ClientLockHolder(other): %v", err)
 	}
@@ -117,7 +117,7 @@ func TestReleaseSequenceLocksReleasesAll(t *testing.T) {
 func TestClientLockHolderForUnlockedClient(t *testing.T) {
 	db := newTestDB(t)
 
-	holder, err := db.ClientLockHolder("never-locked")
+	holder, err := db.ClientLockHolder(t.Context(), "never-locked")
 	if err != nil {
 		t.Fatalf("ClientLockHolder: %v", err)
 	}

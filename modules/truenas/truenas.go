@@ -181,7 +181,8 @@ func (t *Transport) callRPC(conn *websocket.Conn, method string, params any) (an
 		return nil, fmt.Errorf("writing RPC: %w", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	// Best effort: a failure here surfaces as the read below timing out.
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
 	for {
 		var resp map[string]any

@@ -1,6 +1,7 @@
 package conditions
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -80,9 +81,9 @@ type DwellRecord struct {
 // Without it, a daemon that restarts thirty seconds into a five-minute wake
 // gate silently starts the five minutes again.
 type DwellStore interface {
-	LoadDwellTrackers() (map[string]DwellRecord, error)
-	SaveDwellTracker(key string, rec DwellRecord) error
-	DeleteDwellTracker(key string) error
+	LoadDwellTrackers(ctx context.Context) (map[string]DwellRecord, error)
+	SaveDwellTracker(ctx context.Context, key string, rec DwellRecord) error
+	DeleteDwellTracker(ctx context.Context, key string) error
 }
 
 // SetDwellStore attaches a persistence backend and restores saved progress.
@@ -92,8 +93,8 @@ type DwellStore interface {
 // it had earned before shutdown, and accrues again only once the condition is
 // observed true. SPEC §5.3 calls for crediting only elapsed time the daemon
 // can prove.
-func (e *Evaluator) SetDwellStore(store DwellStore) error {
-	records, err := store.LoadDwellTrackers()
+func (e *Evaluator) SetDwellStore(ctx context.Context, store DwellStore) error {
+	records, err := store.LoadDwellTrackers(ctx)
 	if err != nil {
 		return err
 	}
@@ -190,7 +191,7 @@ func (e *Evaluator) persistLocked(key string, tracker *DwellTracker) {
 		Satisfied:  tracker.Satisfied,
 		LastSeen:   tracker.LastSeen,
 	}
-	if err := e.dwellStore.SaveDwellTracker(key, rec); err != nil && e.onPersistError != nil {
+	if err := e.dwellStore.SaveDwellTracker(context.Background(), key, rec); err != nil && e.onPersistError != nil {
 		e.onPersistError(key, err)
 	}
 	tracker.lastPersisted = tracker.LastSeen
@@ -232,7 +233,7 @@ func (e *Evaluator) ResetDwell(cond *config.ConditionConfig) {
 
 	delete(e.dwellState, key)
 	if e.dwellStore != nil {
-		if err := e.dwellStore.DeleteDwellTracker(key); err != nil && e.onPersistError != nil {
+		if err := e.dwellStore.DeleteDwellTracker(context.Background(), key); err != nil && e.onPersistError != nil {
 			e.onPersistError(key, err)
 		}
 	}

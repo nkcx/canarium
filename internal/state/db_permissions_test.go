@@ -12,14 +12,14 @@ import (
 func TestDatabasePermissionsAreRestrictive(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "canarium")
 
-	db, err := Open(dir)
+	db, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
 
 	// Write something so the WAL sibling exists.
-	if err := db.SetPasswordHash("$2a$10$abcdefghijklmnopqrstuv"); err != nil {
+	if err := db.SetPasswordHash(t.Context(), "$2a$10$abcdefghijklmnopqrstuv"); err != nil {
 		t.Fatalf("SetPasswordHash: %v", err)
 	}
 
@@ -49,22 +49,22 @@ func TestDatabasePermissionsAreRestrictive(t *testing.T) {
 func TestOpenIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 
-	first, err := Open(dir)
+	first, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	if err := first.SetPasswordHash("hash"); err != nil {
+	if err := first.SetPasswordHash(t.Context(), "hash"); err != nil {
 		t.Fatalf("SetPasswordHash: %v", err)
 	}
 	first.Close()
 
-	second, err := Open(dir)
+	second, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
 	defer second.Close()
 
-	hash, err := second.GetPasswordHash()
+	hash, err := second.GetPasswordHash(t.Context())
 	if err != nil {
 		t.Fatalf("GetPasswordHash: %v", err)
 	}
@@ -79,16 +79,18 @@ func TestConcurrentWritesDoNotFail(t *testing.T) {
 	db := newTestDB(t)
 
 	seq := &Sequence{ID: "seq-1", PlanName: "outage", State: "shutting_down"}
-	if err := db.SaveSequence(seq); err != nil {
+	if err := db.SaveSequence(t.Context(), seq); err != nil {
 		t.Fatalf("SaveSequence: %v", err)
 	}
+
+	ctx := t.Context()
 
 	const writers = 16
 	errs := make(chan error, writers)
 
 	for i := 0; i < writers; i++ {
 		go func(i int) {
-			errs <- db.SaveClientState(
+			errs <- db.SaveClientState(ctx,
 				"client-"+string(rune('a'+i%26)), "shutting_down", &seq.ID)
 		}(i)
 	}

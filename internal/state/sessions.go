@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -9,9 +10,9 @@ import (
 //
 // The raw token is never stored: a database leak yields digests, which
 // cannot be replayed as cookies.
-func (d *DB) CreateSession(tokenHash string, ttl time.Duration) error {
+func (d *DB) CreateSession(ctx context.Context, tokenHash string, ttl time.Duration) error {
 	now := time.Now()
-	_, err := d.db.Exec(`
+	_, err := d.db.ExecContext(ctx, `
 		INSERT INTO sessions (token_hash, created_at, expires_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(token_hash) DO UPDATE SET
@@ -28,9 +29,9 @@ func (d *DB) CreateSession(tokenHash string, ttl time.Duration) error {
 //
 // Expiry is evaluated in SQL so a session cannot be accepted because of a
 // parse failure, which the previous kv-backed implementation risked.
-func (d *DB) SessionIsValid(tokenHash string) (bool, error) {
+func (d *DB) SessionIsValid(ctx context.Context, tokenHash string) (bool, error) {
 	var count int
-	err := d.db.QueryRow(
+	err := d.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sessions WHERE token_hash = ? AND expires_at > ?",
 		tokenHash, time.Now().Unix(),
 	).Scan(&count)
@@ -42,8 +43,8 @@ func (d *DB) SessionIsValid(tokenHash string) (bool, error) {
 
 // DeleteSession removes a single session. Deleting one that does not exist is
 // not an error, so logout is idempotent.
-func (d *DB) DeleteSession(tokenHash string) error {
-	if _, err := d.db.Exec("DELETE FROM sessions WHERE token_hash = ?", tokenHash); err != nil {
+func (d *DB) DeleteSession(ctx context.Context, tokenHash string) error {
+	if _, err := d.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash = ?", tokenHash); err != nil {
 		return fmt.Errorf("deleting session: %w", err)
 	}
 	return nil
@@ -51,8 +52,8 @@ func (d *DB) DeleteSession(tokenHash string) error {
 
 // DeleteExpiredSessions prunes sessions past their expiry and reports how
 // many rows were removed.
-func (d *DB) DeleteExpiredSessions() (int64, error) {
-	res, err := d.db.Exec("DELETE FROM sessions WHERE expires_at <= ?", time.Now().Unix())
+func (d *DB) DeleteExpiredSessions(ctx context.Context) (int64, error) {
+	res, err := d.db.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at <= ?", time.Now().Unix())
 	if err != nil {
 		return 0, fmt.Errorf("pruning expired sessions: %w", err)
 	}
@@ -66,8 +67,8 @@ func (d *DB) DeleteExpiredSessions() (int64, error) {
 // DeleteAllSessions invalidates every session. Used when the admin password
 // changes, so a stolen cookie does not outlive the credential it was issued
 // against.
-func (d *DB) DeleteAllSessions() (int64, error) {
-	res, err := d.db.Exec("DELETE FROM sessions")
+func (d *DB) DeleteAllSessions(ctx context.Context) (int64, error) {
+	res, err := d.db.ExecContext(ctx, "DELETE FROM sessions")
 	if err != nil {
 		return 0, fmt.Errorf("deleting all sessions: %w", err)
 	}
@@ -80,9 +81,9 @@ func (d *DB) DeleteAllSessions() (int64, error) {
 
 // CountSessions returns the number of sessions currently stored, expired
 // included. Used by tests and diagnostics.
-func (d *DB) CountSessions() (int, error) {
+func (d *DB) CountSessions(ctx context.Context) (int, error) {
 	var n int
-	if err := d.db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&n); err != nil {
+	if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting sessions: %w", err)
 	}
 	return n, nil

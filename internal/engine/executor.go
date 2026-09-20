@@ -192,7 +192,12 @@ func (e *Executor) setClientState(name string, s ClientState, seqID *string) {
 	e.clientStates[name] = s
 	e.mu.Unlock()
 
-	e.db.SaveClientState(name, s.String(), seqID)
+	// A lost client-state write means the executor's view and the journal
+	// disagree, and a restart would resume from the stale one.
+	if err := e.db.SaveClientState(e.ctx, name, s.String(), seqID); err != nil {
+		e.logger.Error("persisting client state",
+			"client", name, "state", s.String(), "error", err)
+	}
 	e.emit(Event{
 		Type:      "client_state_changed",
 		Timestamp: time.Now(),
@@ -244,7 +249,7 @@ func (e *Executor) clearActiveSequence() {
 // The state layer receives a copy, never the live struct: it would otherwise
 // read fields while the executor goroutine writes them.
 func (e *Executor) saveSequence(as *ActiveSequence) {
-	if err := e.db.SaveSequence(as.persistable()); err != nil {
+	if err := e.db.SaveSequence(e.ctx, as.persistable()); err != nil {
 		e.logger.Error("persisting sequence state", "sequence", as.ID(), "error", err)
 	}
 }
@@ -272,7 +277,7 @@ func (e *Executor) Stop() {
 }
 
 func (e *Executor) restoreState() error {
-	states, err := e.db.GetAllClientStates()
+	states, err := e.db.GetAllClientStates(e.ctx)
 	if err != nil {
 		return err
 	}
@@ -282,7 +287,7 @@ func (e *Executor) restoreState() error {
 	}
 	e.mu.Unlock()
 
-	seq, err := e.db.GetActiveSequence()
+	seq, err := e.db.GetActiveSequence(e.ctx)
 	if err != nil {
 		return err
 	}
@@ -434,7 +439,7 @@ func (e *Executor) pruneJournal(retain time.Duration) {
 		return
 	}
 
-	result, err := e.db.PruneJournal(time.Now().Add(-retain))
+	result, err := e.db.PruneJournal(e.ctx, time.Now().Add(-retain))
 	if err != nil {
 		e.logger.Error("pruning journal", "error", err)
 		return
@@ -451,7 +456,7 @@ func (e *Executor) pruneJournal(retain time.Duration) {
 		"stage_records", result.StageRecords)
 
 	// SQLite does not return freed pages to the filesystem on its own.
-	if err := e.db.Vacuum(); err != nil {
+	if err := e.db.Vacuum(e.ctx); err != nil {
 		e.logger.Error("vacuuming database after retention", "error", err)
 	}
 }
