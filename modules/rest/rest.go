@@ -101,21 +101,27 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 
 	url = expandVars(url, client)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return engine.StateDown, nil
+		return engine.StateUnknown, fmt.Errorf("building probe request: %w", err)
 	}
 
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
-		return engine.StateDown, nil
+		// A refused connection says the host is not serving; a timeout or
+		// DNS failure says nothing about the host at all.
+		if netutil.ClassifyDialError(err) == netutil.Unreachable {
+			return engine.StateDown, nil
+		}
+		return engine.StateUnknown, fmt.Errorf("probing %s: %w", netutil.RedactURL(url), err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 500 {
-		return engine.StateUp, nil
-	}
-	return engine.StateDown, nil
+	// Any HTTP response at all means something is serving. A 5xx means the
+	// application is unhealthy, not that the host has powered off, so it is
+	// deliberately not reported as down.
+	return engine.StateUp, nil
 }
 
 func getConfigString(cfg map[string]any, key string) string {

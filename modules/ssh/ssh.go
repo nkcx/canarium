@@ -3,7 +3,6 @@ package ssh
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -86,24 +85,30 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 	return &engine.ActionResult{Success: true, Message: "shutdown initiated"}, nil
 }
 
+// Probe reports whether the host is reachable on its probe port.
+//
+// A dial failure is not reported as "down" unless the network gave positive
+// evidence — a refused connection, or a router reporting the host absent. A
+// timeout or DNS failure returns an error, so the executor records
+// down_unverified rather than treating a network partition as a completed
+// shutdown.
 func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.ClientState, error) {
 	port := client.ProbeConfig.Port
 	if port == 0 {
 		port = 22
 	}
 
-	timeout := client.ProbeConfig.Timeout
-	if timeout == 0 {
-		timeout = 5 * time.Second
-	}
-
 	addr := netutil.HostPort(client.Address, port)
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
+	reach, err := netutil.ProbeTCP(ctx, addr, client.ProbeConfig.Timeout)
+
+	switch reach {
+	case netutil.Reachable:
+		return engine.StateUp, nil
+	case netutil.Unreachable:
 		return engine.StateDown, nil
+	default:
+		return engine.StateUnknown, fmt.Errorf("probing %s: %w", addr, err)
 	}
-	conn.Close()
-	return engine.StateUp, nil
 }
 
 func (t *Transport) connect(ctx context.Context, client *engine.Client) (*gossh.Client, error) {

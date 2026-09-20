@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -242,24 +241,41 @@ func (t *PoeTransport) Execute(ctx context.Context, client *engine.Client, actio
 	}
 }
 
+// Probe reports whether a PoE-powered client is up.
+//
+// The previous implementation dialled UDP against the *switch's* SNMP port
+// and reported success as "up". net.Dial on UDP sends no packet — it only
+// binds a local socket — so it succeeded for any resolvable address and this
+// transport reported every client as up, unconditionally and forever. A
+// PoE-controlled host was therefore never verified down during a shutdown,
+// and was reported awake the instant it was told to wake.
+//
+// Probing a client means probing the client, so this makes a TCP connection
+// to the host itself. Set probe.port to a port the host actually listens on;
+// 22 is the default because a PoE device that can be shut down gracefully
+// almost certainly runs SSH.
 func (t *PoeTransport) Probe(ctx context.Context, client *engine.Client) (engine.ClientState, error) {
-	port := client.ProbeConfig.Port
-	if port == 0 {
-		port = 161
+	if client.Address == "" {
+		return engine.StateUnknown, fmt.Errorf(
+			"snmp-poe: client %s has no address, so its power state cannot be verified", client.Name)
 	}
 
-	timeout := client.ProbeConfig.Timeout
-	if timeout == 0 {
-		timeout = 5 * time.Second
+	port := client.ProbeConfig.Port
+	if port == 0 {
+		port = 22
 	}
 
 	addr := netutil.HostPort(client.Address, port)
-	conn, err := net.DialTimeout("udp", addr, timeout)
-	if err != nil {
+	reach, err := netutil.ProbeTCP(ctx, addr, client.ProbeConfig.Timeout)
+
+	switch reach {
+	case netutil.Reachable:
+		return engine.StateUp, nil
+	case netutil.Unreachable:
 		return engine.StateDown, nil
+	default:
+		return engine.StateUnknown, fmt.Errorf("probing %s: %w", addr, err)
 	}
-	conn.Close()
-	return engine.StateUp, nil
 }
 
 func (t *PoeTransport) setPoeState(ctx context.Context, client *engine.Client, enable bool) (*engine.ActionResult, error) {

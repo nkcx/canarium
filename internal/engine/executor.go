@@ -46,6 +46,9 @@ type Timings struct {
 	DryRunStep time.Duration
 }
 
+// probeTimeout bounds a single background reachability check.
+const probeTimeout = 10 * time.Second
+
 // DefaultTimings returns the production polling intervals.
 func DefaultTimings() Timings {
 	return Timings{
@@ -320,11 +323,18 @@ func (e *Executor) probeAllClients() {
 		}
 
 		client := e.buildClient(&c)
-		ctx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, probeTimeout)
 		probeState, err := t.Probe(ctx, client)
 		cancel()
 
 		if err != nil {
+			// The probe established nothing — a timeout, a DNS failure, a
+			// partition. Leave the recorded state alone rather than
+			// inventing one: "I could not reach it" is not evidence that a
+			// host is down, and treating it as such is how a switch reboot
+			// gets recorded as a completed shutdown.
+			e.logger.Debug("probe inconclusive; leaving client state unchanged",
+				"client", c.Name, "state", e.GetClientState(c.Name), "error", err)
 			continue
 		}
 
