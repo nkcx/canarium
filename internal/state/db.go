@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,87 +46,6 @@ func Open(dataDir string) (*DB, error) {
 
 func (d *DB) Close() error {
 	return d.db.Close()
-}
-
-func migrate(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS sequences (
-			id TEXT PRIMARY KEY,
-			plan_name TEXT NOT NULL,
-			state TEXT NOT NULL,
-			current_stage INTEGER NOT NULL DEFAULT 0,
-			ponr_crossed INTEGER NOT NULL DEFAULT 0,
-			started_at TEXT NOT NULL,
-			completed_at TEXT,
-			config_snapshot BLOB,
-			pre_sequence_state TEXT,
-			resolved_addrs TEXT
-		);
-
-		CREATE TABLE IF NOT EXISTS client_states (
-			client_name TEXT PRIMARY KEY,
-			state TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			sequence_id TEXT
-		);
-
-		CREATE TABLE IF NOT EXISTS intents (
-			id TEXT PRIMARY KEY,
-			sequence_id TEXT NOT NULL,
-			client_name TEXT NOT NULL,
-			action TEXT NOT NULL,
-			timestamp TEXT NOT NULL,
-			status TEXT NOT NULL,
-			result TEXT,
-			FOREIGN KEY (sequence_id) REFERENCES sequences(id)
-		);
-
-		CREATE TABLE IF NOT EXISTS stage_records (
-			sequence_id TEXT NOT NULL,
-			stage_index INTEGER NOT NULL,
-			stage_name TEXT NOT NULL,
-			started_at TEXT NOT NULL,
-			completed_at TEXT,
-			clients TEXT,
-			PRIMARY KEY (sequence_id, stage_index),
-			FOREIGN KEY (sequence_id) REFERENCES sequences(id)
-		);
-
-		CREATE TABLE IF NOT EXISTS dwell_state (
-			condition_key TEXT PRIMARY KEY,
-			required_ns INTEGER NOT NULL,
-			first_true TEXT,
-			last_true TEXT,
-			satisfied INTEGER NOT NULL DEFAULT 0
-		);
-
-		CREATE TABLE IF NOT EXISTS client_locks (
-			client_name TEXT PRIMARY KEY,
-			sequence_id TEXT NOT NULL,
-			locked_at TEXT NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS api_tokens (
-			token_hash TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			scope TEXT NOT NULL DEFAULT 'read',
-			created_at TEXT NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS auth (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			password_hash TEXT NOT NULL
-		);
-
-		CREATE TABLE IF NOT EXISTS kv (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_intents_sequence ON intents(sequence_id);
-		CREATE INDEX IF NOT EXISTS idx_intents_client ON intents(client_name);
-	`)
-	return err
 }
 
 func (d *DB) SaveSequence(seq *Sequence) error {
@@ -408,4 +328,10 @@ type ClientResult struct {
 	StartedAt   string `json:"started_at"`
 	CompletedAt string `json:"completed_at,omitempty"`
 	Error       string `json:"error,omitempty"`
+}
+
+// nowUnixString renders the current time as Unix seconds for the schema
+// columns that store integer timestamps.
+func nowUnixString() string {
+	return strconv.FormatInt(time.Now().Unix(), 10)
 }
