@@ -2,6 +2,12 @@ module github.com/nkcx/canarium
 
 go 1.26.0
 
+// Pinned so every build — local, CI and container — uses the same
+// compiler. go1.26.1 fixes a set of standard-library advisories
+// (GO-2026-4599, GO-2026-4600 and others) that govulncheck reports against
+// 1.26.0; 1.26.8 is the current patch.
+toolchain go1.26.8
+
 require (
 	github.com/expr-lang/expr v1.17.8
 	github.com/gorilla/websocket v1.5.3

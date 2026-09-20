@@ -686,3 +686,28 @@ func TestHealthReportsVersion(t *testing.T) {
 
 // engineModeArmed is a small helper so the test reads clearly.
 func engineModeArmed() engine.Mode { return engine.ParseMode("armed") }
+
+// TestMissingWebUIExplainsItself covers a binary built without running the
+// frontend build: it embeds only the placeholder that keeps the go:embed
+// pattern satisfiable on a fresh clone.
+func TestMissingWebUIExplainsItself(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	rec := do(t, s, "GET", "/", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "make build") {
+		t.Errorf("the response does not say how to fix it:\n%s", rec.Body.String())
+	}
+}
+
+// TestAPIRoutesTakePrecedenceOverTheSPAFallback: the catch-all must not
+// swallow API paths.
+func TestAPIRoutesTakePrecedenceOverTheSPAFallback(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "GET", "/api/health", ""); rec.Code != http.StatusOK {
+		t.Errorf("/api/health got %d, want 200 — the catch-all route shadowed it", rec.Code)
+	}
+}

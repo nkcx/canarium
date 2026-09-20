@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,13 +122,60 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/abort", s.requireScope(state.ScopeAdmin, s.handleAbort))
 	s.mux.HandleFunc("POST /api/sequence/proceed", s.requireScope(state.ScopeAdmin, s.handleProceed))
 
+	s.routeWebUI()
+}
+
+// routeWebUI serves the embedded single-page application.
+func (s *Server) routeWebUI() {
 	webContent, err := fs.Sub(s.webFS, "web/dist")
 	if err != nil {
-		s.logger.Warn("web UI not found in embedded FS, serving API only")
+		s.logger.Warn("embedded web UI is unavailable; serving the API only", "error", err)
+		s.mux.HandleFunc("/", s.handleMissingUI)
 		return
 	}
+
+	// A binary built without running the frontend build embeds only the
+	// placeholder that keeps the go:embed pattern satisfiable. Detect that
+	// and say so, rather than returning a bare 404 that looks like a routing
+	// bug.
+	if _, err := fs.Stat(webContent, "index.html"); err != nil {
+		s.logger.Warn("this binary was built without the web UI; " +
+			"run `make build` to include it")
+		s.mux.HandleFunc("/", s.handleMissingUI)
+		return
+	}
+
 	fileServer := http.FileServer(http.FS(webContent))
-	s.mux.Handle("/", fileServer)
+
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Serve index.html for any path the bundle does not contain, so
+		// deep links and browser reloads reach the SPA router instead of a
+		// 404. Anything under /api is already claimed by a more specific
+		// pattern, so it never reaches here.
+		if _, err := fs.Stat(webContent, strings.TrimPrefix(path.Clean(r.URL.Path), "/")); err != nil {
+			r = r.Clone(r.Context())
+			r.URL.Path = "/"
+		}
+
+		// The UI is a build artefact keyed by content hash, but index.html
+		// itself must not be cached or a deploy leaves stale asset
+		// references behind.
+		if r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html") {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+
+		fileServer.ServeHTTP(w, r)
+	})
+}
+
+// handleMissingUI explains that this binary carries no web UI.
+func (s *Server) handleMissingUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	fmt.Fprint(w, "This Canarium binary was built without the web UI.\n\n"+
+		"Build it with `make build`, which compiles the frontend into\n"+
+		"web/dist before embedding it. The API is unaffected and is\n"+
+		"available under /api.\n")
 }
 
 func (s *Server) Start(addr string) error {

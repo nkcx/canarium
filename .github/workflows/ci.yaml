@@ -18,12 +18,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26.8"
           cache: true
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.21"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -45,6 +45,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Audit frontend dependencies
+        run: cd web && npm audit --audit-level=high
+
       - name: Build
         run: go build ./...
 
@@ -63,12 +71,8 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.26.8"
           cache: true
-
-      # The embedded web UI must exist for packages that import it to build.
-      - name: Stub embedded web assets
-        run: mkdir -p web/dist && touch web/dist/index.html
 
       - uses: golangci/golangci-lint-action@v6
         with:

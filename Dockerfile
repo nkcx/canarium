@@ -7,7 +7,7 @@
 # static assets; running node under QEMU for a foreign target would be pure
 # waste.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:22.21-alpine AS frontend
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -21,12 +21,18 @@ RUN npm run build
 # toolchain can cross-compile natively on the build host. This avoids
 # emulating the entire toolchain under QEMU for arm/arm64 targets.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine AS backend
 
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG VERSION=dev
+
+# Use the toolchain in the image rather than downloading one mid-build.
+# go.mod pins a toolchain version; if it ever exceeds what this base image
+# provides, the build should fail loudly here rather than reaching out to the
+# network and producing a binary nobody chose.
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 

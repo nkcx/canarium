@@ -8,8 +8,12 @@
 
 # Frontend
 web/node_modules/
-web/dist/
 web/.svelte-kit/
+
+# Build output, except the placeholder that keeps the go:embed pattern
+# satisfiable on a fresh clone. See web/dist/.gitkeep.
+web/dist/*
+!web/dist/.gitkeep
 
 # IDE
 .idea/
