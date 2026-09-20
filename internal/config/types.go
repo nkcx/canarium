@@ -282,3 +282,8 @@ func DefaultBootDeadline() time.Duration {
 func DefaultRetries() int {
 	return 3
 }
+
+// DefaultJournalRetain is how long finished sequences are kept.
+func DefaultJournalRetain() time.Duration {
+	return 30 * 24 * time.Hour
+}

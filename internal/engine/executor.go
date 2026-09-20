@@ -49,6 +49,10 @@ type Timings struct {
 // probeTimeout bounds a single background reachability check.
 const probeTimeout = 10 * time.Second
 
+// retentionInterval is how often the journal is pruned. Retention windows
+// are measured in days, so checking hourly is ample.
+const retentionInterval = 1 * time.Hour
+
 // DefaultTimings returns the production polling intervals.
 func DefaultTimings() Timings {
 	return Timings{
@@ -257,6 +261,7 @@ func (e *Executor) Start() error {
 	go e.probeLoop()
 	go e.policyLoop()
 	go e.qualityLoop()
+	go e.retentionLoop()
 
 	return nil
 }
@@ -382,6 +387,71 @@ func (e *Executor) qualityLoop() {
 		case <-ticker.C:
 			e.refreshFacts()
 		}
+	}
+}
+
+// retentionLoop enforces canarium.journal_retain.
+//
+// The setting has existed with a 30d default since the first commit and
+// nothing ever read it, so every sequence, intent and stage record
+// accumulated permanently — on an SD card, in a daemon expected to run for
+// years.
+func (e *Executor) retentionLoop() {
+	retain, err := config.Duration(e.cfg.Canarium.JournalRetain, config.DefaultJournalRetain())
+	if err != nil {
+		e.logger.Error("invalid journal_retain; using the default",
+			"value", e.cfg.Canarium.JournalRetain,
+			"default", config.DefaultJournalRetain(), "error", err)
+	}
+
+	if retain <= 0 {
+		e.logger.Info("journal retention is disabled; records are kept indefinitely")
+		return
+	}
+
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+
+	e.pruneJournal(retain)
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			e.pruneJournal(retain)
+		}
+	}
+}
+
+func (e *Executor) pruneJournal(retain time.Duration) {
+	// Never prune while a sequence is running. Retention is housekeeping;
+	// an outage is not the time to be holding a write transaction over the
+	// journal the executor is actively appending to.
+	if e.ActiveSequence() != nil {
+		e.logger.Debug("skipping journal retention: a sequence is in progress")
+		return
+	}
+
+	result, err := e.db.PruneJournal(time.Now().Add(-retain))
+	if err != nil {
+		e.logger.Error("pruning journal", "error", err)
+		return
+	}
+
+	if result.Total() == 0 {
+		return
+	}
+
+	e.logger.Info("pruned journal records older than the retention window",
+		"retain", retain,
+		"sequences", result.Sequences,
+		"intents", result.Intents,
+		"stage_records", result.StageRecords)
+
+	// SQLite does not return freed pages to the filesystem on its own.
+	if err := e.db.Vacuum(); err != nil {
+		e.logger.Error("vacuuming database after retention", "error", err)
 	}
 }
 
