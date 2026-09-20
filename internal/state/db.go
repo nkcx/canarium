@@ -321,23 +321,6 @@ func (d *DB) GetPasswordHash() (string, error) {
 	return hash, err
 }
 
-func (d *DB) SaveAPIToken(tokenHash, name, scope string) error {
-	_, err := d.db.Exec(`
-		INSERT INTO api_tokens (token_hash, name, scope, created_at)
-		VALUES (?, ?, ?, ?)
-	`, tokenHash, name, scope, time.Now().Format(time.RFC3339Nano))
-	return err
-}
-
-func (d *DB) ValidateAPIToken(tokenHash string) (string, error) {
-	var scope string
-	err := d.db.QueryRow("SELECT scope FROM api_tokens WHERE token_hash = ?", tokenHash).Scan(&scope)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return scope, err
-}
-
 type Sequence struct {
 	ID               string
 	PlanName         string

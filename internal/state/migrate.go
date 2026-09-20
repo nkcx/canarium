@@ -144,6 +144,18 @@ var migrations = []migration{
 				ON stage_records(sequence_id)`,
 		},
 	},
+	{
+		version: 6,
+		name:    "api token metadata",
+		stmts: []string{
+			// api_tokens has existed since the first schema and was checked
+			// on every request, but nothing could ever insert a row: there
+			// was no command, no endpoint and no caller of SaveAPIToken.
+			// Names must be unique so revocation can address one.
+			`ALTER TABLE api_tokens ADD COLUMN last_used_at TEXT`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_name ON api_tokens(name)`,
+		},
+	},
 }
 
 // migrate brings the database up to the latest schema version.

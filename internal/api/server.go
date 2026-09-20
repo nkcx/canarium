@@ -94,20 +94,26 @@ func NewServer(
 }
 
 func (s *Server) routes() {
+	// Unauthenticated: the healthcheck and the endpoints needed to
+	// bootstrap or establish a session.
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
-	s.mux.HandleFunc("GET /api/status", s.requireAuth(s.handleStatus))
-	s.mux.HandleFunc("GET /api/facts", s.requireAuth(s.handleFacts))
-	s.mux.HandleFunc("GET /api/clients", s.requireAuth(s.handleClients))
-	s.mux.HandleFunc("GET /api/plans", s.requireAuth(s.handlePlans))
-	s.mux.HandleFunc("GET /api/sequence", s.requireAuth(s.handleSequence))
-	s.mux.HandleFunc("POST /api/mode", s.requireAuth(s.handleSetMode))
-	s.mux.HandleFunc("POST /api/abort", s.requireAuth(s.handleAbort))
-	s.mux.HandleFunc("POST /api/sequence/proceed", s.requireAuth(s.handleProceed))
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleSetup)
-	s.mux.HandleFunc("GET /api/ws", s.requireAuth(s.handleWebSocket))
+
+	// Read scope: observing the system.
+	s.mux.HandleFunc("GET /api/status", s.requireScope(state.ScopeRead, s.handleStatus))
+	s.mux.HandleFunc("GET /api/facts", s.requireScope(state.ScopeRead, s.handleFacts))
+	s.mux.HandleFunc("GET /api/clients", s.requireScope(state.ScopeRead, s.handleClients))
+	s.mux.HandleFunc("GET /api/plans", s.requireScope(state.ScopeRead, s.handlePlans))
+	s.mux.HandleFunc("GET /api/sequence", s.requireScope(state.ScopeRead, s.handleSequence))
+	s.mux.HandleFunc("GET /api/ws", s.requireScope(state.ScopeRead, s.handleWebSocket))
+
+	// Admin scope: anything that changes what the daemon will do.
+	s.mux.HandleFunc("POST /api/mode", s.requireScope(state.ScopeAdmin, s.handleSetMode))
+	s.mux.HandleFunc("POST /api/abort", s.requireScope(state.ScopeAdmin, s.handleAbort))
+	s.mux.HandleFunc("POST /api/sequence/proceed", s.requireScope(state.ScopeAdmin, s.handleProceed))
 
 	webContent, err := fs.Sub(s.webFS, "web/dist")
 	if err != nil {
@@ -542,6 +548,17 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 // first-run screen. /api/auth/status and /api/auth/setup stay open so that
 // bootstrap is possible; setup itself refuses once a password exists.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireScope(state.ScopeAdmin, next)
+}
+
+// requireScope wraps a handler so it is reachable only by a caller holding at
+// least the given scope.
+//
+// Session cookies carry admin scope: the single local admin is the operator.
+// API tokens carry whatever scope they were issued with, so a monitoring
+// integration can be given a read-only token that cannot arm the executor or
+// abort a sequence.
+func (s *Server) requireScope(required string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		storedHash, err := s.db.GetPasswordHash()
 		if err != nil {
@@ -558,13 +575,31 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		if s.authenticate(r) {
-			next(w, r)
+		scope, ok := s.authenticate(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		if !scopeAllows(scope, required) {
+			s.logger.Warn("rejecting a request outside the credential's scope",
+				"path", r.URL.Path, "have", scope, "need", required)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "this credential has " + scope + " scope; " + required + " is required",
+			})
+			return
+		}
+
+		next(w, r)
 	}
+}
+
+// scopeAllows reports whether a held scope satisfies a requirement.
+func scopeAllows(held, required string) bool {
+	if held == state.ScopeAdmin {
+		return true
+	}
+	return held == required
 }
 
 // authenticate reports whether the request carries a valid API token or a
@@ -572,29 +607,34 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // distinguishing "no credential", "unknown credential" and "expired
 // credential" to the caller would let an unauthenticated client probe for
 // valid tokens.
-func (s *Server) authenticate(r *http.Request) bool {
+func (s *Server) authenticate(r *http.Request) (scope string, ok bool) {
 	if token := bearerToken(r); token != "" {
 		scope, err := s.db.ValidateAPIToken(hashToken(token))
 		if err != nil {
 			s.logger.Error("validating API token", "error", err)
-			return false
+			return "", false
 		}
 		if scope != "" {
-			return true
+			return scope, true
 		}
 	}
 
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
-		return false
+		return "", false
 	}
 
 	valid, err := s.db.SessionIsValid(hashToken(cookie.Value))
 	if err != nil {
 		s.logger.Error("validating session", "error", err)
-		return false
+		return "", false
 	}
-	return valid
+	if !valid {
+		return "", false
+	}
+
+	// A browser session belongs to the single local admin.
+	return state.ScopeAdmin, true
 }
 
 // bearerToken extracts a token from the Authorization header, accepting both
@@ -627,9 +667,16 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 
 	setupRequired := storedHash == ""
 
+	var authenticated bool
+	var scope string
+	if !setupRequired {
+		scope, authenticated = s.authenticate(r)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"setup_required":      setupRequired,
-		"authenticated":       !setupRequired && s.authenticate(r),
+		"authenticated":       authenticated,
+		"scope":               scope,
 		"min_password_length": MinPasswordLength,
 	})
 }

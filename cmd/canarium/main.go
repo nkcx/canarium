@@ -53,6 +53,7 @@ func main() {
 		validateCmd(&configPath),
 		doctorCmd(&configPath),
 		simulateCmd(&configPath),
+		tokenCmd(&configPath),
 	)
 
 	if err := root.Execute(); err != nil {

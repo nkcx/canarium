@@ -431,3 +431,154 @@ func TestStopBeforeStartDoesNotPanic(t *testing.T) {
 		t.Errorf("Stop before Start returned %v, want nil", err)
 	}
 }
+
+// issueToken creates an API token with the given scope and returns it.
+func issueToken(t *testing.T, db *state.DB, name, scope string) string {
+	t.Helper()
+
+	token := "test-token-" + name
+	if err := db.SaveAPIToken(hashToken(token), name, scope); err != nil {
+		t.Fatalf("SaveAPIToken: %v", err)
+	}
+	return token
+}
+
+func withToken(t *testing.T, s *Server, method, path, body, token string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, r)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAPITokenAuthenticates covers a code path that was unreachable: nothing
+// could create a token, so the Authorization branch never ran.
+func TestAPITokenAuthenticates(t *testing.T) {
+	s, db := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	token := issueToken(t, db, "monitoring", state.ScopeRead)
+
+	if rec := withToken(t, s, "GET", "/api/status", "", token); rec.Code != http.StatusOK {
+		t.Errorf("read-scoped token rejected on a read endpoint: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestReadTokenCannotArmTheExecutor is the point of having scopes: a
+// monitoring integration must not be able to arm the system.
+func TestReadTokenCannotArmTheExecutor(t *testing.T) {
+	s, db := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	token := issueToken(t, db, "monitoring", state.ScopeRead)
+
+	for _, ep := range []struct{ method, path, body string }{
+		{"POST", "/api/mode", `{"mode":"armed"}`},
+		{"POST", "/api/abort", ""},
+		{"POST", "/api/sequence/proceed", ""},
+	} {
+		t.Run(ep.path, func(t *testing.T) {
+			rec := withToken(t, s, ep.method, ep.path, ep.body, token)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("got %d, want 403 — a read-scoped token reached a control endpoint", rec.Code)
+			}
+		})
+	}
+}
+
+func TestAdminTokenHasFullAccess(t *testing.T) {
+	s, db := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	token := issueToken(t, db, "automation", state.ScopeAdmin)
+
+	if rec := withToken(t, s, "GET", "/api/status", "", token); rec.Code != http.StatusOK {
+		t.Errorf("admin token rejected on a read endpoint: %d", rec.Code)
+	}
+	if rec := withToken(t, s, "POST", "/api/mode", `{"mode":"dry-run"}`, token); rec.Code != http.StatusOK {
+		t.Errorf("admin token rejected on a control endpoint: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUnknownTokenIsRejected(t *testing.T) {
+	s, _ := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	if rec := withToken(t, s, "GET", "/api/status", "", "not-a-real-token"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("got %d, want 401 for an unknown token", rec.Code)
+	}
+}
+
+func TestRevokedTokenIsRejected(t *testing.T) {
+	s, db := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	token := issueToken(t, db, "temporary", state.ScopeAdmin)
+	if rec := withToken(t, s, "GET", "/api/status", "", token); rec.Code != http.StatusOK {
+		t.Fatalf("token did not work before revocation: %d", rec.Code)
+	}
+
+	removed, err := db.DeleteAPIToken("temporary")
+	if err != nil || !removed {
+		t.Fatalf("DeleteAPIToken: removed=%v err=%v", removed, err)
+	}
+
+	if rec := withToken(t, s, "GET", "/api/status", "", token); rec.Code != http.StatusUnauthorized {
+		t.Errorf("got %d, want 401 for a revoked token", rec.Code)
+	}
+}
+
+// TestSessionCookieCarriesAdminScope: the single local admin is the operator.
+func TestSessionCookieCarriesAdminScope(t *testing.T) {
+	s, _ := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	if rec := do(t, s, "POST", "/api/mode", `{"mode":"dry-run"}`, cookie); rec.Code != http.StatusOK {
+		t.Errorf("session cookie rejected on a control endpoint: %d %s", rec.Code, rec.Body.String())
+	}
+
+	got := decode(t, do(t, s, "GET", "/api/auth/status", "", cookie))
+	if got["scope"] != state.ScopeAdmin {
+		t.Errorf("scope = %v, want %q", got["scope"], state.ScopeAdmin)
+	}
+}
+
+func TestScopeAllows(t *testing.T) {
+	tests := []struct {
+		held, required string
+		want           bool
+	}{
+		{state.ScopeAdmin, state.ScopeAdmin, true},
+		{state.ScopeAdmin, state.ScopeRead, true},
+		{state.ScopeRead, state.ScopeRead, true},
+		{state.ScopeRead, state.ScopeAdmin, false},
+		{"", state.ScopeRead, false},
+	}
+
+	for _, tt := range tests {
+		if got := scopeAllows(tt.held, tt.required); got != tt.want {
+			t.Errorf("scopeAllows(%q, %q) = %v, want %v", tt.held, tt.required, got, tt.want)
+		}
+	}
+}
