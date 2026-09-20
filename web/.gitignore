@@ -8,7 +8,13 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+
+# Build output, except the placeholder that keeps the go:embed pattern in
+# web.go satisfiable on a fresh clone. See dist/.gitkeep and the matching
+# rule in the repository-root .gitignore.
+dist/*
+!dist/.gitkeep
+
 dist-ssr
 *.local
 

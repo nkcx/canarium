@@ -1,0 +1,10 @@
+This file exists so `//go:embed all:web/dist` in web.go has something to match
+on a fresh clone, before the frontend has been built.
+
+Without it, `go build ./...`, `go vet ./...` and `go test ./...` all fail on a
+newly cloned repository with:
+
+    pattern all:web/dist: no matching files found
+
+`make build` builds the frontend into this directory first; a real build's
+output is gitignored.
