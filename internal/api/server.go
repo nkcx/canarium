@@ -54,7 +54,7 @@ type Server struct {
 	server   *http.Server
 
 	wsMu      sync.RWMutex
-	wsClients map[*wsClient]bool
+	wsClients map[*wsClient]struct{}
 
 	// loginLimiter throttles repeated failed logins per source address.
 	loginLimiter *failureLimiter
@@ -82,7 +82,7 @@ func NewServer(
 		logger:    logger,
 		webFS:     webFS,
 		mux:       http.NewServeMux(),
-		wsClients: make(map[*wsClient]bool),
+		wsClients: make(map[*wsClient]struct{}),
 		loginLimiter: newFailureLimiter(
 			maxLoginFailures, failureWindow, lockoutDuration),
 		ctx:    ctx,
@@ -143,6 +143,7 @@ func (s *Server) Start(addr string) error {
 // during shutdown.
 func (s *Server) Stop(ctx context.Context) error {
 	s.cancel()
+	s.closeWebSockets()
 
 	if s.server == nil {
 		return nil
