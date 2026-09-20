@@ -263,6 +263,24 @@ func (h *harness) startSequence(planName string) <-chan struct{} {
 	return done
 }
 
+// lastSequenceID returns the most recent sequence's id from the database.
+func (h *harness) lastSequenceID(t *testing.T) string {
+	t.Helper()
+
+	if as := h.exec.ActiveSequence(); as != nil {
+		return as.ID()
+	}
+
+	seq, err := h.db.LastSequence()
+	if err != nil {
+		t.Fatalf("LastSequence: %v", err)
+	}
+	if seq == nil {
+		t.Fatal("no sequence was recorded")
+	}
+	return seq.ID
+}
+
 // waitFor polls cond until it holds or the deadline passes.
 func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()

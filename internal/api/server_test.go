@@ -109,6 +109,7 @@ var protectedEndpoints = []struct {
 	{"GET", "/api/sequence", ""},
 	{"POST", "/api/mode", `{"mode":"armed"}`},
 	{"POST", "/api/abort", ""},
+	{"POST", "/api/sequence/proceed", ""},
 }
 
 // TestUnconfiguredServerRejectsProtectedEndpoints is the regression test for

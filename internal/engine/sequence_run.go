@@ -74,7 +74,12 @@ func (e *Executor) resumeSequence(as *ActiveSequence) {
 func (e *Executor) runShutdownStages(as *ActiveSequence) {
 	plan := as.Plan()
 
-	for i := as.CurrentStage(); i < len(plan.Shutdown.Stages); i++ {
+	// The index is advanced explicitly rather than by a for-post statement:
+	// wait_policy "hold" has to re-enter the same stage, and expressing that
+	// as `i--; continue` against an implicit `i++` is how the original code
+	// arrived at a loop nobody could reason about.
+	i := as.CurrentStage()
+	for i < len(plan.Shutdown.Stages) {
 		stage := &plan.Shutdown.Stages[i]
 
 		as.SetCurrentStage(i)
@@ -86,30 +91,25 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 		}
 
 		outcome := e.waitForStage(as, stage)
-		switch outcome {
-		case stageProceed:
-		case stageAborted:
+
+		if outcome == stageAborted {
 			e.handleAbort(as)
 			return
-		case stageCancelled:
+		}
+		if outcome == stageCancelled {
 			// The daemon is stopping. Leave the sequence marked in-progress
 			// so it resumes on restart, but drop the in-memory handle.
 			e.logger.Info("sequence interrupted by shutdown", "sequence", as.ID())
 			e.clearActiveSequence()
 			return
-		case stageTimedOut:
-			e.logger.Warn("stage wait timed out",
-				"stage", stage.Name, "policy", stage.WaitPolicy)
-			switch stage.WaitPolicy {
-			case "hold":
-				i--
-				continue
-			case "escalate":
-				e.emit(Event{Type: "stage_timeout", Timestamp: time.Now(), Data: stage.Name})
-				continue
-			default:
+		}
+		if outcome == stageTimedOut {
+			if e.handleStageTimeout(as, stage, i) {
+				// Policy is hold: wait on this stage again.
 				continue
 			}
+			i++
+			continue
 		}
 
 		// The point of no return is crossed here — once the stage's entry
@@ -135,6 +135,8 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 		e.emit(Event{Type: "stage_start", Timestamp: time.Now(), Data: stage.Name})
 		e.executeStage(as, stage, i)
 		e.emit(Event{Type: "stage_complete", Timestamp: time.Now(), Data: stage.Name})
+
+		i++
 	}
 
 	if plan.Shutdown.PostShutdown != nil {
@@ -144,6 +146,89 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 	as.SetState(SeqStateWakeGate)
 	e.saveSequence(as)
 	e.runWake(as)
+}
+
+// handleStageTimeout applies a stage's wait_policy after its entry condition
+// failed to hold within wait_timeout.
+//
+// Returns true when the caller should wait on the same stage again, which is
+// what wait_policy "hold" means.
+//
+// Note what skipping means: the stage's clients are never shut down, and the
+// sequence carries on to the next stage as though nothing happened. That is
+// the documented behaviour of the default policy, but it used to happen
+// silently — no event, and escalate differed from skip only by emitting
+// stage_timeout. An operator reviewing the journal could not tell that half
+// the rack had been left running.
+func (e *Executor) handleStageTimeout(as *ActiveSequence, stage *config.StageConfig, idx int) bool {
+	policy := stage.WaitPolicy
+	if policy == "" {
+		policy = config.WaitPolicySkip
+	}
+
+	if policy == config.WaitPolicyHold {
+		// Re-enter the wait. waitForStage polls the abort condition, the
+		// operator proceed request and the daemon context, so holding stays
+		// interruptible rather than wedging the sequence.
+		e.logger.Warn("stage is holding: its entry condition has not been met "+
+			"and wait_policy is hold; it will wait until the condition holds, "+
+			"an operator forces it through, or the sequence is aborted",
+			"stage", stage.Name, "sequence", as.ID())
+
+		if as.HeldStage() != stage.Name {
+			as.SetHeldStage(stage.Name)
+			e.emit(Event{Type: "stage_held", Timestamp: time.Now(), Data: stage.Name})
+		}
+		as.SetCurrentStage(idx)
+		return true // re-enter the wait on this same stage
+	}
+
+	clients := config.ResolveClientRefs(stage.Clients, e.cfg)
+	e.logger.Warn("stage skipped: its entry condition was not met within wait_timeout, "+
+		"so these clients will NOT be shut down",
+		"stage", stage.Name,
+		"policy", policy,
+		"clients", clients,
+		"sequence", as.ID())
+
+	if policy == config.WaitPolicyEscalate {
+		e.emit(Event{Type: "stage_timeout", Timestamp: time.Now(), Data: stage.Name})
+	}
+
+	e.emit(Event{
+		Type:      "stage_skipped",
+		Timestamp: time.Now(),
+		Data: map[string]any{
+			"stage":   stage.Name,
+			"policy":  policy,
+			"clients": clients,
+			"reason":  "entry condition not met within wait_timeout",
+		},
+	})
+
+	// Record the skip so the journal shows why these hosts were left up.
+	now := time.Now()
+	record := &state.StageRecord{
+		SequenceID:  as.ID(),
+		StageIndex:  idx,
+		StageName:   stage.Name,
+		StartedAt:   now,
+		CompletedAt: &now,
+		Clients:     make(map[string]state.ClientResult, len(clients)),
+	}
+	for _, name := range clients {
+		record.Clients[name] = state.ClientResult{
+			State:       e.GetClientState(name).String(),
+			StartedAt:   now.Format(time.RFC3339Nano),
+			CompletedAt: now.Format(time.RFC3339Nano),
+			Error:       "stage skipped: entry condition not met within wait_timeout",
+		}
+	}
+	if err := e.db.SaveStageRecord(record); err != nil {
+		e.logger.Error("persisting skipped stage record", "stage", stage.Name, "error", err)
+	}
+
+	return false // move on to the next stage
 }
 
 // stageOutcome is the result of waiting for a stage's entry condition.
@@ -165,6 +250,18 @@ func (e *Executor) waitForStage(as *ActiveSequence, stage *config.StageConfig) s
 
 	for {
 		if e.evaluator.Evaluate(&stage.When, time.Now()) == facts.True {
+			as.SetHeldStage("")
+			return stageProceed
+		}
+		if forced, reason := as.ConsumeProceed(); forced {
+			e.logger.Warn("stage forced through by operator despite an unmet entry condition",
+				"stage", stage.Name, "reason", reason, "sequence", as.ID())
+			e.emit(Event{
+				Type:      "stage_forced",
+				Timestamp: time.Now(),
+				Data:      map[string]any{"stage": stage.Name, "reason": reason},
+			})
+			as.SetHeldStage("")
 			return stageProceed
 		}
 		if e.shouldAbort(as) {
@@ -683,6 +780,20 @@ func (e *Executor) dependenciesMet(clientName string) bool {
 		}
 	}
 	return true
+}
+
+// ForceStage releases a stage that is waiting on an entry condition, so an
+// operator can push a held sequence forward.
+func (e *Executor) ForceStage(reason string) error {
+	as := e.ActiveSequence()
+	if as == nil {
+		return fmt.Errorf("no active sequence")
+	}
+
+	as.RequestProceed(reason)
+	e.logger.Info("operator requested that the current stage proceed",
+		"sequence", as.ID(), "reason", reason)
+	return nil
 }
 
 // AbortSequence asks the running sequence to stop.

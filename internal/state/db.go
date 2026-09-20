@@ -82,6 +82,11 @@ func (d *DB) GetActiveSequence() (*Sequence, error) {
 		LIMIT 1
 	`)
 
+	return scanSequence(row)
+}
+
+// scanSequence decodes one sequences row.
+func scanSequence(row *sql.Row) (*Sequence, error) {
 	var seq Sequence
 	var startedAt, preState, resolved string
 	var completedAt, configSnapshot *string
@@ -92,21 +97,44 @@ func (d *DB) GetActiveSequence() (*Sequence, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scanning sequence: %w", err)
 	}
 
-	seq.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
+	seq.StartedAt, err = time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parsing sequence started_at %q: %w", startedAt, err)
+	}
 	if completedAt != nil {
-		t, _ := time.Parse(time.RFC3339Nano, *completedAt)
+		t, err := time.Parse(time.RFC3339Nano, *completedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing sequence completed_at %q: %w", *completedAt, err)
+		}
 		seq.CompletedAt = &t
 	}
 	if configSnapshot != nil {
 		seq.ConfigSnapshot = []byte(*configSnapshot)
 	}
-	json.Unmarshal([]byte(preState), &seq.PreSequenceState)
-	json.Unmarshal([]byte(resolved), &seq.ResolvedAddrs)
+	if err := json.Unmarshal([]byte(preState), &seq.PreSequenceState); err != nil {
+		return nil, fmt.Errorf("decoding pre_sequence_state: %w", err)
+	}
+	if err := json.Unmarshal([]byte(resolved), &seq.ResolvedAddrs); err != nil {
+		return nil, fmt.Errorf("decoding resolved_addrs: %w", err)
+	}
 
 	return &seq, nil
+}
+
+// LastSequence returns the most recently started sequence, or nil if none
+// has ever run.
+func (d *DB) LastSequence() (*Sequence, error) {
+	row := d.db.QueryRow(`
+		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at,
+		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs
+		FROM sequences
+		ORDER BY started_at DESC
+		LIMIT 1
+	`)
+	return scanSequence(row)
 }
 
 func (d *DB) SaveClientState(name, state string, sequenceID *string) error {

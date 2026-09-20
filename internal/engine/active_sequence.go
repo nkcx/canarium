@@ -39,6 +39,53 @@ type ActiveSequence struct {
 	// sequence whose abort condition has not fired.
 	abortRequested bool
 	abortReason    string
+
+	// proceedRequested lets an operator release a stage that is holding on
+	// an entry condition which will not arrive. SPEC §7.2 specifies that
+	// wait_policy: hold "requires manual intervention"; this is it.
+	proceedRequested bool
+	proceedReason    string
+
+	// heldStage names the stage currently holding, for the status API.
+	heldStage string
+}
+
+// RequestProceed releases a stage that is holding on its entry condition.
+func (a *ActiveSequence) RequestProceed(reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proceedRequested = true
+	a.proceedReason = reason
+}
+
+// ConsumeProceed reports whether an operator has asked the current stage to
+// proceed, clearing the request so it applies to one stage only.
+func (a *ActiveSequence) ConsumeProceed() (bool, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.proceedRequested {
+		return false, ""
+	}
+	reason := a.proceedReason
+	a.proceedRequested = false
+	a.proceedReason = ""
+	return true, reason
+}
+
+// SetHeldStage records which stage is waiting past its timeout, or clears it
+// when passed the empty string.
+func (a *ActiveSequence) SetHeldStage(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.heldStage = name
+}
+
+// HeldStage returns the stage currently holding past its wait timeout.
+func (a *ActiveSequence) HeldStage() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.heldStage
 }
 
 func newActiveSequence(seq *state.Sequence, plan *config.PlanConfig) *ActiveSequence {
@@ -179,6 +226,7 @@ type SequenceSnapshot struct {
 	Abortable      bool       `json:"abortable"`
 	AbortRequested bool       `json:"abort_requested"`
 	AbortReason    string     `json:"abort_reason,omitempty"`
+	HeldStage      string     `json:"held_stage,omitempty"`
 	StartedAt      time.Time  `json:"started_at"`
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 }
@@ -199,6 +247,7 @@ func (a *ActiveSequence) Snapshot() SequenceSnapshot {
 		Abortable:      !a.seq.PonrCrossed,
 		AbortRequested: a.abortRequested,
 		AbortReason:    a.abortReason,
+		HeldStage:      a.heldStage,
 		StartedAt:      a.seq.StartedAt,
 	}
 

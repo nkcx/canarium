@@ -125,6 +125,24 @@ type PostShutdownConfig struct {
 	Password string `yaml:"password,omitempty"`
 }
 
+// Wait policies control what happens when a stage's entry condition does not
+// hold before wait_timeout expires.
+const (
+	// WaitPolicySkip abandons the stage and moves to the next one. Its
+	// clients are never shut down.
+	WaitPolicySkip = "skip"
+
+	// WaitPolicyEscalate is skip, plus a notification.
+	WaitPolicyEscalate = "escalate"
+
+	// WaitPolicyHold waits indefinitely for the condition, or for an
+	// operator to force the stage through.
+	WaitPolicyHold = "hold"
+)
+
+// ValidWaitPolicies lists every accepted wait_policy value.
+var ValidWaitPolicies = []string{WaitPolicySkip, WaitPolicyEscalate, WaitPolicyHold}
+
 type StageConfig struct {
 	Name            string          `yaml:"name"`
 	When            ConditionConfig `yaml:"when"`

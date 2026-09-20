@@ -102,6 +102,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sequence", s.requireAuth(s.handleSequence))
 	s.mux.HandleFunc("POST /api/mode", s.requireAuth(s.handleSetMode))
 	s.mux.HandleFunc("POST /api/abort", s.requireAuth(s.handleAbort))
+	s.mux.HandleFunc("POST /api/sequence/proceed", s.requireAuth(s.handleProceed))
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
@@ -320,6 +321,31 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "abort requested"})
+}
+
+// handleProceed releases a stage that is holding on an entry condition which
+// is not going to arrive. wait_policy: hold is documented as requiring
+// manual intervention; this is that intervention.
+func (s *Server) handleProceed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req)
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		reason = "requested via API"
+	}
+
+	if err := s.executor.ForceStage(reason); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+
+	s.logger.Warn("operator forced the current stage to proceed",
+		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "proceed requested"})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

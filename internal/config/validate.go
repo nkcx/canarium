@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -131,6 +132,22 @@ func validatePlans(cfg *Config, result *ValidationResult) {
 				}
 			}
 
+			// An unrecognised policy previously fell through to skip, so a
+			// typo silently turned a stage that should hold into one that
+			// abandons its clients.
+			if s.WaitPolicy != "" && !slices.Contains(ValidWaitPolicies, s.WaitPolicy) {
+				result.AddError("plan %q stage %q: invalid wait_policy %q (must be one of %s)",
+					p.Name, s.Name, s.WaitPolicy, strings.Join(ValidWaitPolicies, ", "))
+			}
+
+			// skip is the default and is a reasonable choice, but it means
+			// these hosts are simply never shut down. Say so out loud.
+			if s.WaitPolicy == WaitPolicySkip || s.WaitPolicy == "" {
+				result.AddInfo("plan %q stage %q: wait_policy is %q — if the entry condition "+
+					"has not held within %s, these clients will not be shut down",
+					p.Name, s.Name, WaitPolicySkip, waitTimeoutOrDefault(s.WaitTimeout))
+			}
+
 			for _, ref := range s.Clients {
 				if strings.HasPrefix(ref, "tag:") {
 					tag := strings.TrimPrefix(ref, "tag:")
@@ -155,6 +172,15 @@ func validatePlans(cfg *Config, result *ValidationResult) {
 
 		validateConditionConfig(&p.Wake.Gate, fmt.Sprintf("plan %q wake gate", p.Name), result)
 	}
+}
+
+// waitTimeoutOrDefault renders a stage's wait timeout for diagnostics.
+func waitTimeoutOrDefault(value string) string {
+	d, err := Duration(value, DefaultWaitTimeout())
+	if err != nil {
+		return value
+	}
+	return d.String()
 }
 
 func validateDependencies(cfg *Config, result *ValidationResult) {
