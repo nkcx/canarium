@@ -1,26 +1,67 @@
 <script>
   import { status, facts, clients, sequence, events } from '../lib/stores/api.js';
 
-  function qualityColor(q) {
-    if (q === 'good') return 'text-ok';
-    if (q === 'stale') return 'text-warn';
-    return 'text-danger';
+  function qualityDot(q) {
+    if (q === 'good') return 'bg-ok';
+    if (q === 'stale') return 'bg-warn';
+    return 'bg-ink-muted';
   }
 
   function stateColor(state) {
     if (state === 'up') return 'bg-ok';
-    if (state === 'down' || state === 'failed') return 'bg-danger';
-    if (state === 'shutting_down' || state === 'waking') return 'bg-warn';
-    if (state === 'down_unverified') return 'bg-warn';
-    return 'bg-ink-muted';
+    if (state === 'down') return 'bg-ink-muted';
+    if (state === 'failed') return 'bg-danger';
+    if (state === 'shutting_down' || state === 'waking' || state === 'down_unverified') {
+      return 'bg-warn';
+    }
+    return 'bg-ink-faint';
   }
 
-  function formatValue(val) {
+  /**
+   * Renders a fact value for display.
+   *
+   * Integers are shown as integers: the previous version applied toFixed(1)
+   * to every number, so a runtime of 3600 seconds read as "3600.0".
+   */
+  function formatValue(fact) {
+    const val = fact?.value;
     if (val === null || val === undefined) return '—';
-    if (Array.isArray(val)) return val.join(' ');
-    if (typeof val === 'number') return val.toFixed(1);
+    if (Array.isArray(val)) return val.length ? val.join(' ') : '—';
+    if (typeof val === 'boolean') return val ? 'yes' : 'no';
+
+    if (typeof val === 'number') {
+      if (fact.type === 'duration') return formatSeconds(val);
+      if (fact.type === 'percent') return `${round(val)}%`;
+      return round(val);
+    }
+
     return String(val);
   }
+
+  function round(n) {
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  }
+
+  /** Renders a duration in seconds as something a human reads at a glance. */
+  function formatSeconds(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const mins = Math.floor(seconds / 60);
+    if (mins < 60) return `${mins}m ${Math.round(seconds % 60)}s`;
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+
+  /** A unit suffix, unless formatValue has already expressed it. */
+  function unitSuffix(fact) {
+    if (!fact?.unit) return '';
+    if (fact.type === 'percent' || fact.type === 'duration') return '';
+    return ` ${fact.unit}`;
+  }
+
+  // Sorted so the grid does not reshuffle on every refresh; Object.entries
+  // follows insertion order, which a Go map randomises per response.
+  $: sortedFacts = Object.entries($facts).sort(([a], [b]) => a.localeCompare(b));
+
+  $: staleFacts = sortedFacts.filter(([, f]) => f.quality !== 'good');
 
   function timeAgo(ts) {
     if (!ts) return '';
@@ -36,11 +77,20 @@
   <!-- Header -->
   <div class="flex items-center justify-between mb-6">
     <h1 class="text-sm font-bold text-ink tracking-wider">DASHBOARD</h1>
-    {#if $status}
-      <div class="flex items-center gap-3">
-        {#if $status.sequence}
-          <span class="px-2 py-1 rounded text-[10px] font-bold bg-amber/20 text-amber animate-pulse">
-            {$status.sequence.state?.toUpperCase()}
+    {#if $status?.sequence}
+      <div class="flex items-center gap-2">
+        <span class="px-2 py-1 rounded text-[10px] font-bold bg-amber/20 text-amber animate-pulse">
+          {$status.sequence.state?.toUpperCase()}
+        </span>
+        {#if $status.sequence.stage_name}
+          <span class="text-[10px] text-ink-muted">
+            {$status.sequence.stage_name}
+            ({$status.sequence.current_stage + 1}/{$status.sequence.total_stages})
+          </span>
+        {/if}
+        {#if $status.sequence.ponr_crossed}
+          <span class="px-2 py-1 rounded text-[10px] font-bold bg-danger/20 text-danger">
+            PONR CROSSED
           </span>
         {/if}
       </div>
@@ -49,17 +99,28 @@
 
   <!-- Facts Grid -->
   <section class="mb-6">
-    <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">FACTS</h2>
+    <div class="flex items-center gap-2 mb-3">
+      <h2 class="text-[10px] text-ink-muted tracking-wider">FACTS</h2>
+      {#if staleFacts.length > 0}
+        <span class="text-[10px] text-warn">
+          {staleFacts.length} not reporting — conditions reading them cannot be satisfied
+        </span>
+      {/if}
+    </div>
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-      {#each Object.entries($facts) as [key, fact]}
-        <div class="border border-edge rounded-[var(--radius-sm)] p-3 bg-surface-50">
+      {#each sortedFacts as [key, fact] (key)}
+        <div
+          class="border rounded-[var(--radius-sm)] p-3 bg-surface-50 transition-colors
+            {fact.quality === 'good' ? 'border-edge' : 'border-warn/40'}"
+          title={fact.description || key}
+        >
           <div class="text-[10px] text-ink-muted truncate mb-1">{key}</div>
-          <div class="text-lg font-bold tabular-nums">
-            {formatValue(fact.value)}
+          <div class="text-lg font-bold tabular-nums
+            {fact.quality === 'good' ? 'text-ink' : 'text-ink-muted'}">
+            {formatValue(fact)}<span class="text-xs font-normal text-ink-muted">{unitSuffix(fact)}</span>
           </div>
           <div class="flex items-center gap-1.5 mt-1">
-            <span class="w-1 h-1 rounded-full {qualityColor(fact.quality)}
-              {fact.quality === 'good' ? 'bg-ok' : fact.quality === 'stale' ? 'bg-warn' : 'bg-danger'}"></span>
+            <span class="w-1 h-1 rounded-full {qualityDot(fact.quality)}"></span>
             <span class="text-[9px] text-ink-muted">{fact.quality}</span>
             {#if fact.updated_at}
               <span class="text-[9px] text-ink-faint ml-auto">{timeAgo(fact.updated_at)}</span>

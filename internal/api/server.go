@@ -220,16 +220,35 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
-	allFacts := s.store.AllFacts()
-	result := make(map[string]any)
-	for key, f := range allFacts {
-		val, quality, updated := f.Get()
-		result[key] = map[string]any{
-			"value":      val,
-			"quality":    quality.String(),
-			"updated_at": updated,
-		}
+	type factInfo struct {
+		Value       any       `json:"value"`
+		Quality     string    `json:"quality"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Type        string    `json:"type,omitempty"`
+		Unit        string    `json:"unit,omitempty"`
+		Description string    `json:"description,omitempty"`
 	}
+
+	declarations := s.store.AllDeclarations()
+
+	result := make(map[string]factInfo)
+	for key, f := range s.store.AllFacts() {
+		value, quality, updated := f.Get()
+
+		info := factInfo{Value: value, Quality: quality.String(), UpdatedAt: updated}
+
+		// Type, unit and description come from the source's declaration.
+		// Without them the UI cannot tell 3600 seconds of runtime from 3600
+		// of anything else, and rendered every number to one decimal place.
+		if decl, ok := declarations[key]; ok && decl != nil {
+			info.Type = decl.Type
+			info.Unit = decl.Unit
+			info.Description = decl.Description
+		}
+
+		result[key] = info
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -178,20 +178,88 @@ export async function refreshAll() {
 }
 
 export async function setMode(mode) {
-  await apiFetch('/mode', {
-    method: 'POST',
-    body: JSON.stringify({ mode }),
-  });
-  await refreshAll();
+  try {
+    await apiFetch('/mode', { method: 'POST', body: JSON.stringify({ mode }) });
+    await refreshAll();
+    return { ok: true };
+  } catch (e) {
+    await refreshAll();
+    return { ok: false, error: e.message };
+  }
 }
 
-export async function abortSequence() {
-  await apiFetch('/abort', { method: 'POST' });
-  await refreshAll();
+/**
+ * Requests that the running sequence be aborted.
+ * Returns { ok } or { ok: false, error } — the server refuses with 409 once
+ * the point of no return has been crossed.
+ */
+export async function abortSequence(reason) {
+  try {
+    await apiFetch('/abort', {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason ?? 'requested from the web UI' }),
+    });
+    await refreshAll();
+    return { ok: true };
+  } catch (e) {
+    await refreshAll();
+    return { ok: false, error: e.message };
+  }
+}
+
+/** Forces a held stage to proceed despite its entry condition. */
+export async function proceedStage(reason) {
+  try {
+    await apiFetch('/sequence/proceed', {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason ?? 'forced from the web UI' }),
+    });
+    await refreshAll();
+    return { ok: true };
+  } catch (e) {
+    await refreshAll();
+    return { ok: false, error: e.message };
+  }
 }
 
 let ws = null;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
+let refreshTimer = null;
+
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+/** Events whose arrival means the cached snapshot is out of date. */
+const REFRESH_TRIGGERING_EVENTS = new Set([
+  'client_state_changed',
+  'mode_changed',
+  'trigger',
+  'abort',
+  'ponr_crossed',
+  'stage_start',
+  'stage_complete',
+  'stage_skipped',
+  'stage_held',
+  'stage_forced',
+  'wake_gate_satisfied',
+  'sequence_completed',
+]);
+
+/**
+ * Coalesces refreshes triggered by inbound events.
+ *
+ * A staged shutdown or wake emits a burst of client_state_changed events, and
+ * refreshing on each one fired five API requests per event — a thundering
+ * herd against the daemon at exactly the moment it is busiest.
+ */
+function scheduleRefresh() {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    refreshAll();
+  }, 250);
+}
 
 export function connectWS() {
   if (ws) return;
@@ -201,6 +269,7 @@ export function connectWS() {
 
   ws.onopen = () => {
     connected.set(true);
+    reconnectAttempts = 0;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -208,23 +277,33 @@ export function connectWS() {
   };
 
   ws.onmessage = (e) => {
+    let evt;
     try {
-      const evt = JSON.parse(e.data);
-      events.update(list => {
-        const next = [evt, ...list];
-        return next.slice(0, MAX_EVENTS);
-      });
+      evt = JSON.parse(e.data);
+    } catch (err) {
+      console.error('discarding malformed event:', err);
+      return;
+    }
 
-      if (evt.type === 'client_state_changed' || evt.type === 'mode_changed') {
-        refreshAll();
-      }
-    } catch {}
+    events.update(list => [evt, ...list].slice(0, MAX_EVENTS));
+
+    if (REFRESH_TRIGGERING_EVENTS.has(evt.type)) {
+      scheduleRefresh();
+    }
   };
 
   ws.onclose = () => {
     connected.set(false);
     ws = null;
-    reconnectTimer = setTimeout(connectWS, 5000);
+
+    // Back off so a daemon that is down does not get hammered, with jitter
+    // so several open tabs do not reconnect in lockstep.
+    const delay = Math.min(
+      RECONNECT_BASE_MS * 2 ** reconnectAttempts,
+      RECONNECT_MAX_MS,
+    );
+    reconnectAttempts += 1;
+    reconnectTimer = setTimeout(connectWS, delay + Math.random() * 1000);
   };
 
   ws.onerror = () => {
@@ -238,6 +317,11 @@ export function disconnectWS() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  reconnectAttempts = 0;
   if (ws) {
     // Drop the handler first so onclose does not schedule a reconnect.
     ws.onclose = null;

@@ -1,6 +1,15 @@
 <script>
   import { onMount } from 'svelte';
-  import { checkAuth, refreshAll, connectWS, logout, authenticated, status, connected } from './lib/stores/api.js';
+  import {
+    checkAuth,
+    refreshAll,
+    connectWS,
+    disconnectWS,
+    logout,
+    authenticated,
+    status,
+    connected,
+  } from './lib/stores/api.js';
   import Dashboard from './routes/Dashboard.svelte';
   import Clients from './routes/Clients.svelte';
   import Plans from './routes/Plans.svelte';
@@ -8,13 +17,10 @@
   import Login from './routes/Login.svelte';
 
   let currentView = 'dashboard';
-  let pollTimer;
+  let pollTimer = null;
 
   async function handleLogout() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    stopSession();
     await logout();
   }
 
@@ -25,22 +31,37 @@
     { id: 'settings', label: 'Settings' },
   ];
 
-  onMount(async () => {
-    await checkAuth();
-    if ($authenticated) {
-      await refreshAll();
-      connectWS();
-      pollTimer = setInterval(refreshAll, 15000);
-    }
-    return () => {
-      if (pollTimer) clearInterval(pollTimer);
-    };
-  });
+  const POLL_INTERVAL_MS = 15000;
 
-  $: if ($authenticated && !pollTimer) {
+  function startSession() {
+    if (pollTimer) return;
     refreshAll();
     connectWS();
-    pollTimer = setInterval(refreshAll, 15000);
+    pollTimer = setInterval(refreshAll, POLL_INTERVAL_MS);
+  }
+
+  function stopSession() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    disconnectWS();
+  }
+
+  // onMount's cleanup must be returned synchronously. The previous version
+  // was an async function, so Svelte received a Promise rather than a
+  // cleanup function and the interval was never cleared.
+  onMount(() => {
+    checkAuth();
+    return stopSession;
+  });
+
+  // Start polling when authentication is established, and stop when it is
+  // lost — including when a request 401s because the session expired.
+  $: if ($authenticated) {
+    startSession();
+  } else {
+    stopSession();
   }
 </script>
 
