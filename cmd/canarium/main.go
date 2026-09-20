@@ -316,6 +316,10 @@ func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger
 							Host:         getStr(m, "host"),
 							UPS:          getStr(m, "ups"),
 							PollInterval: getStr(m, "poll_interval"),
+							// Previously omitted, so credentials in the
+							// config file were silently discarded.
+							Username: getStr(m, "username"),
+							Password: getStr(m, "password"),
 						}
 						if p, ok := m["port"].(int); ok {
 							ic.Port = p
@@ -326,7 +330,7 @@ func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger
 			}
 
 			nutCfg := nutmod.Config{Instances: instances}
-			nutmod.RegisterFacts(store, nutCfg)
+			nutmod.RegisterFacts(store, nutCfg, logger)
 
 			source := nutmod.NewSource(nutCfg, logger)
 			updates := make(chan engine.FactUpdate, 100)

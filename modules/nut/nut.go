@@ -1,3 +1,5 @@
+// Package nut reads UPS state from a Network UPS Tools server and issues
+// instant commands to it.
 package nut
 
 import (
@@ -15,13 +17,19 @@ import (
 	"github.com/nkcx/canarium/internal/netutil"
 )
 
-// defaultNUTPort is the IANA-registered port for the NUT network protocol.
-const defaultNUTPort = 3493
+const (
+	// defaultNUTPort is the IANA-registered port for the NUT network protocol.
+	defaultNUTPort = 3493
 
-type Source struct {
-	instances []InstanceConfig
-	logger    *slog.Logger
-}
+	// defaultUPSName is NUT's conventional single-UPS name.
+	defaultUPSName = "ups"
+
+	// defaultPollInterval matches NUT's own default driver poll.
+	defaultPollInterval = 15 * time.Second
+
+	dialTimeout = 5 * time.Second
+	ioTimeout   = 10 * time.Second
+)
 
 type Config struct {
 	Instances []InstanceConfig `yaml:"instances"`
@@ -37,32 +45,62 @@ type InstanceConfig struct {
 	Password     string `yaml:"password,omitempty"`
 }
 
-func NewSource(cfg Config, logger *slog.Logger) *Source {
-	return &Source{
-		instances: cfg.Instances,
-		logger:    logger,
+func (c InstanceConfig) host() string {
+	if c.Host == "" {
+		return "localhost"
 	}
+	return c.Host
+}
+
+func (c InstanceConfig) port() int {
+	if c.Port == 0 {
+		return defaultNUTPort
+	}
+	return c.Port
+}
+
+func (c InstanceConfig) ups() string {
+	if c.UPS == "" {
+		return defaultUPSName
+	}
+	return c.UPS
+}
+
+func (c InstanceConfig) pollInterval() time.Duration {
+	if c.PollInterval == "" {
+		return defaultPollInterval
+	}
+	d, err := time.ParseDuration(c.PollInterval)
+	if err != nil || d <= 0 {
+		return defaultPollInterval
+	}
+	return d
+}
+
+type Source struct {
+	instances []InstanceConfig
+	logger    *slog.Logger
+}
+
+func NewSource(cfg Config, logger *slog.Logger) *Source {
+	return &Source{instances: cfg.Instances, logger: logger}
 }
 
 func (s *Source) Name() string { return "nut" }
 
 func (s *Source) Declarations() []engine.SourceDeclaration {
-	var decls []engine.SourceDeclaration
+	decls := make([]engine.SourceDeclaration, 0, len(s.instances))
 	for _, inst := range s.instances {
-		poll, _ := time.ParseDuration(inst.PollInterval)
-		if poll == 0 {
-			poll = 15 * time.Second
-		}
 		decls = append(decls, engine.SourceDeclaration{
 			InstanceName: inst.Name,
-			PollInterval: poll,
+			PollInterval: inst.pollInterval(),
 			Facts: []engine.FactDeclEntry{
 				{Name: "battery.charge", Type: "percent", Description: "State of charge"},
-				{Name: "battery.runtime", Type: "duration", Description: "Estimated runtime remaining (seconds)"},
+				{Name: "battery.runtime", Type: "duration", Unit: "seconds", Description: "Estimated runtime remaining"},
 				{Name: "status", Type: "set", Values: []string{"OL", "OB", "LB", "RB", "CHRG", "DISCHRG", "ALARM", "OVER", "TRIM", "BOOST", "BYPASS", "OFF"}, Description: "UPS status flags"},
-				{Name: "battery.voltage", Type: "number", Description: "Battery voltage"},
-				{Name: "input.voltage", Type: "number", Description: "Input voltage"},
-				{Name: "output.voltage", Type: "number", Description: "Output voltage"},
+				{Name: "battery.voltage", Type: "number", Unit: "volts", Description: "Battery voltage"},
+				{Name: "input.voltage", Type: "number", Unit: "volts", Description: "Input voltage"},
+				{Name: "output.voltage", Type: "number", Unit: "volts", Description: "Output voltage"},
 				{Name: "ups.load", Type: "percent", Description: "UPS load percentage"},
 				{Name: "ups.temperature", Type: "number", Unit: "celsius", Description: "UPS internal temperature"},
 			},
@@ -82,135 +120,95 @@ func (s *Source) Start(ctx context.Context, updates chan<- engine.FactUpdate) er
 //
 // Each poll opens and closes its own connection, so there is nothing to tear
 // down; the method exists to satisfy engine.Source.
-func (s *Source) Stop() error {
-	return nil
-}
+func (s *Source) Stop() error { return nil }
 
 func (s *Source) pollInstance(ctx context.Context, inst InstanceConfig, updates chan<- engine.FactUpdate) {
-	poll, _ := time.ParseDuration(inst.PollInterval)
-	if poll == 0 {
-		poll = 15 * time.Second
-	}
-
-	ticker := time.NewTicker(poll)
+	ticker := time.NewTicker(inst.pollInterval())
 	defer ticker.Stop()
 
-	s.fetchAndUpdate(inst, updates)
+	s.fetchAndUpdate(ctx, inst, updates)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.fetchAndUpdate(inst, updates)
+			s.fetchAndUpdate(ctx, inst, updates)
 		}
 	}
 }
 
-func (s *Source) fetchAndUpdate(inst InstanceConfig, updates chan<- engine.FactUpdate) {
-	host := inst.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := inst.Port
-	if port == 0 {
-		port = defaultNUTPort
-	}
-	ups := inst.UPS
-	if ups == "" {
-		ups = "ups"
-	}
-
-	vars, err := s.queryUPS(host, port, ups)
+func (s *Source) fetchAndUpdate(ctx context.Context, inst InstanceConfig, updates chan<- engine.FactUpdate) {
+	vars, err := s.queryUPS(ctx, inst)
 	if err != nil {
-		s.logger.Error("NUT poll failed", "instance", inst.Name, "error", err)
+		s.logger.Error("NUT poll failed",
+			"instance", inst.Name, "host", inst.host(), "ups", inst.ups(), "error", err)
 		return
 	}
 
 	now := time.Now()
-	prefix := inst.Name
 
-	if v, ok := vars["battery.charge"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			updates <- engine.FactUpdate{Key: prefix + ".battery.charge", Value: f, Timestamp: now}
+	emit := func(key string, value any) {
+		select {
+		case updates <- engine.FactUpdate{Key: inst.Name + "." + key, Value: value, Timestamp: now}:
+		case <-ctx.Done():
 		}
 	}
 
-	if v, ok := vars["battery.runtime"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			updates <- engine.FactUpdate{Key: prefix + ".battery.runtime", Value: f, Timestamp: now}
-		}
-	}
-
-	if v, ok := vars["ups.status"]; ok {
-		flags := strings.Fields(v)
-		updates <- engine.FactUpdate{Key: prefix + ".status", Value: flags, Timestamp: now}
-	}
-
-	numericVars := map[string]string{
+	// NUT variable name -> Canarium fact name.
+	numeric := map[string]string{
+		"battery.charge":  "battery.charge",
+		"battery.runtime": "battery.runtime",
 		"battery.voltage": "battery.voltage",
 		"input.voltage":   "input.voltage",
 		"output.voltage":  "output.voltage",
 		"ups.load":        "ups.load",
 		"ups.temperature": "ups.temperature",
 	}
-	for nutVar, factName := range numericVars {
-		if v, ok := vars[nutVar]; ok {
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				updates <- engine.FactUpdate{Key: prefix + "." + factName, Value: f, Timestamp: now}
-			}
+	for nutVar, factName := range numeric {
+		v, ok := vars[nutVar]
+		if !ok {
+			continue
 		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			s.logger.Warn("NUT returned a non-numeric value for a numeric variable",
+				"instance", inst.Name, "variable", nutVar, "value", v)
+			continue
+		}
+		emit(factName, f)
+	}
+
+	if v, ok := vars["ups.status"]; ok {
+		emit("status", strings.Fields(v))
 	}
 }
 
-func (s *Source) queryUPS(host string, port int, ups string) (map[string]string, error) {
-	addr := netutil.HostPort(host, port)
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+// queryUPS opens a connection, authenticates if credentials are configured,
+// and lists the UPS's variables.
+func (s *Source) queryUPS(ctx context.Context, inst InstanceConfig) (map[string]string, error) {
+	conn, err := dial(ctx, inst.host(), inst.port())
 	if err != nil {
-		return nil, fmt.Errorf("connecting to NUT: %w", err)
+		return nil, err
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	session := newSession(conn)
+	defer session.logout()
 
-	fmt.Fprintf(conn, "LIST VAR %s\n", ups)
-
-	scanner := bufio.NewScanner(conn)
-	vars := make(map[string]string)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "BEGIN LIST VAR") {
-			continue
-		}
-		if strings.HasPrefix(line, "END LIST VAR") {
-			break
-		}
-		if strings.HasPrefix(line, "ERR") {
-			return nil, fmt.Errorf("NUT error: %s", line)
-		}
-		if strings.HasPrefix(line, "VAR "+ups+" ") {
-			rest := strings.TrimPrefix(line, "VAR "+ups+" ")
-			parts := strings.SplitN(rest, " ", 2)
-			if len(parts) == 2 {
-				name := parts[0]
-				value := strings.Trim(parts[1], "\"")
-				vars[name] = value
-			}
-		}
+	if err := session.authenticate(inst.Username, inst.Password); err != nil {
+		return nil, err
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading NUT response: %w", err)
-	}
-
-	return vars, nil
+	return session.listVars(inst.ups())
 }
 
-func RegisterFacts(store *facts.Store, cfg Config) {
-	src := NewSource(cfg, slog.Default())
+// RegisterFacts pre-registers fact declarations so conditions can reference
+// them before the first poll completes.
+func RegisterFacts(store *facts.Store, cfg Config, logger *slog.Logger) {
+	src := NewSource(cfg, logger)
 	for _, decl := range src.Declarations() {
-		var factDecls []facts.FactDeclaration
+		factDecls := make([]facts.FactDeclaration, 0, len(decl.Facts))
 		for _, f := range decl.Facts {
 			factDecls = append(factDecls, facts.FactDeclaration{
 				Name:        f.Name,
@@ -224,6 +222,220 @@ func RegisterFacts(store *facts.Store, cfg Config) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Protocol
+// ---------------------------------------------------------------------------
+
+func dial(ctx context.Context, host string, port int) (net.Conn, error) {
+	addr := netutil.HostPort(host, port)
+
+	dialer := net.Dialer{Timeout: dialTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to NUT at %s: %w", addr, err)
+	}
+
+	deadline := time.Now().Add(ioTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("setting deadline: %w", err)
+	}
+
+	return conn, nil
+}
+
+// session wraps a NUT connection with the request/response handling the
+// protocol needs.
+type session struct {
+	conn    net.Conn
+	scanner *bufio.Scanner
+}
+
+func newSession(conn net.Conn) *session {
+	return &session{conn: conn, scanner: bufio.NewScanner(conn)}
+}
+
+func (s *session) send(format string, args ...any) error {
+	if _, err := fmt.Fprintf(s.conn, format+"\n", args...); err != nil {
+		return fmt.Errorf("writing to NUT: %w", err)
+	}
+	return nil
+}
+
+func (s *session) readLine() (string, error) {
+	if !s.scanner.Scan() {
+		if err := s.scanner.Err(); err != nil {
+			return "", fmt.Errorf("reading from NUT: %w", err)
+		}
+		return "", fmt.Errorf("NUT closed the connection unexpectedly")
+	}
+	return s.scanner.Text(), nil
+}
+
+// authenticate performs the USERNAME/PASSWORD exchange.
+//
+// This was previously absent entirely. InstanceConfig declared Username and
+// Password, examples/basic.yaml documented them, and neither was ever read
+// from the config or sent to the server. Any NUT server requiring
+// authentication — which is every server that permits instant commands —
+// rejected the connection, and the post_shutdown feature that tells the UPS
+// to cut its outlets could never have worked.
+func (s *session) authenticate(username, password string) error {
+	if username == "" && password == "" {
+		return nil
+	}
+	if username == "" || password == "" {
+		return fmt.Errorf("NUT credentials incomplete: both username and password are required")
+	}
+
+	if err := s.send("USERNAME %s", username); err != nil {
+		return err
+	}
+	line, err := s.readLine()
+	if err != nil {
+		return err
+	}
+	if err := checkOK(line, "USERNAME"); err != nil {
+		return err
+	}
+
+	if err := s.send("PASSWORD %s", password); err != nil {
+		return err
+	}
+	line, err = s.readLine()
+	if err != nil {
+		return err
+	}
+	return checkOK(line, "PASSWORD")
+}
+
+// listVars issues LIST VAR and collects the response.
+func (s *session) listVars(ups string) (map[string]string, error) {
+	if err := s.send("LIST VAR %s", ups); err != nil {
+		return nil, err
+	}
+
+	vars := make(map[string]string)
+	prefix := "VAR " + ups + " "
+	sawBegin := false
+
+	for {
+		line, err := s.readLine()
+		if err != nil {
+			return nil, err
+		}
+
+		switch {
+		case strings.HasPrefix(line, "BEGIN LIST VAR"):
+			sawBegin = true
+
+		case strings.HasPrefix(line, "END LIST VAR"):
+			if !sawBegin {
+				return nil, fmt.Errorf("NUT sent END LIST VAR without BEGIN")
+			}
+			return vars, nil
+
+		case strings.HasPrefix(line, "ERR "):
+			return nil, nutError(line)
+
+		case strings.HasPrefix(line, prefix):
+			name, value, ok := parseVarLine(strings.TrimPrefix(line, prefix))
+			if ok {
+				vars[name] = value
+			}
+		}
+	}
+}
+
+// logout closes the session politely. Errors are ignored: the connection is
+// being torn down regardless.
+func (s *session) logout() {
+	_ = s.send("LOGOUT")
+}
+
+// parseVarLine splits a `name "value"` pair from a LIST VAR response.
+//
+// NUT quotes values and escapes embedded quotes and backslashes with a
+// backslash. The previous implementation used strings.Trim, which strips any
+// number of quotes from both ends and leaves escapes in place, so a value
+// containing a quote came back mangled.
+func parseVarLine(rest string) (name, value string, ok bool) {
+	name, quoted, found := strings.Cut(rest, " ")
+	if !found || name == "" {
+		return "", "", false
+	}
+
+	quoted = strings.TrimSpace(quoted)
+	if !strings.HasPrefix(quoted, `"`) || !strings.HasSuffix(quoted, `"`) || len(quoted) < 2 {
+		// Unquoted values are not standard but are harmless to accept.
+		return name, quoted, true
+	}
+
+	inner := quoted[1 : len(quoted)-1]
+
+	var sb strings.Builder
+	sb.Grow(len(inner))
+	escaped := false
+	for _, r := range inner {
+		if escaped {
+			sb.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		sb.WriteRune(r)
+	}
+
+	return name, sb.String(), true
+}
+
+func checkOK(line, what string) error {
+	if strings.HasPrefix(line, "OK") {
+		return nil
+	}
+	if strings.HasPrefix(line, "ERR ") {
+		return fmt.Errorf("NUT rejected %s: %w", what, nutError(line))
+	}
+	return fmt.Errorf("unexpected NUT response to %s: %q", what, line)
+}
+
+// nutError turns an ERR line into a Go error, expanding the codes an operator
+// is most likely to hit into something actionable.
+func nutError(line string) error {
+	code := strings.TrimSpace(strings.TrimPrefix(line, "ERR "))
+	if i := strings.IndexByte(code, ' '); i >= 0 {
+		code = code[:i]
+	}
+
+	switch code {
+	case "ACCESS-DENIED":
+		return fmt.Errorf("access denied: check the username and password, and that " +
+			"upsd.users grants this user the required actions")
+	case "UNKNOWN-UPS":
+		return fmt.Errorf("unknown UPS: the name does not match any entry in ups.conf")
+	case "CMD-NOT-SUPPORTED":
+		return fmt.Errorf("command not supported by this UPS driver")
+	case "INSTCMD-FAILED":
+		return fmt.Errorf("the UPS rejected the instant command")
+	case "DRIVER-NOT-CONNECTED":
+		return fmt.Errorf("the NUT driver is not connected to the UPS")
+	case "DATA-STALE":
+		return fmt.Errorf("NUT reports its data as stale; the driver has lost contact with the UPS")
+	default:
+		return fmt.Errorf("NUT error: %s", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Transport — instant commands
+// ---------------------------------------------------------------------------
+
 type NUTTransport struct {
 	logger *slog.Logger
 }
@@ -236,46 +448,108 @@ func (t *NUTTransport) Name() string { return "nut" }
 
 func (t *NUTTransport) Capabilities() []engine.Capability {
 	return []engine.Capability{
-		{Action: engine.ActionOutletOff, Idempotent: false, Timeout: 10 * time.Second},
-		{Action: engine.ActionOutletOn, Idempotent: false, Timeout: 10 * time.Second},
+		{Action: engine.ActionOutletOff, Idempotent: false, Timeout: ioTimeout},
+		{Action: engine.ActionOutletOn, Idempotent: false, Timeout: ioTimeout},
 	}
 }
 
+// Execute issues an instant command (INSTCMD) to the UPS.
+//
+// Instant commands always require authentication on any NUT server that has
+// not been deliberately opened up, so credentials are effectively mandatory
+// here.
 func (t *NUTTransport) Execute(ctx context.Context, client *engine.Client, action engine.ActionType) (*engine.ActionResult, error) {
-	command, ok := client.TransportConfig["command"].(string)
-	if !ok {
-		return nil, fmt.Errorf("no NUT command configured")
+	switch action {
+	case engine.ActionOutletOff, engine.ActionOutletOn:
+	default:
+		return nil, fmt.Errorf("nut transport does not support action %s", action)
 	}
 
+	cfg := client.TransportConfig
+
+	command := configString(cfg, "command")
+	if command == "" {
+		return nil, fmt.Errorf("nut transport: no command configured")
+	}
+
+	// The host to connect to is distinct from the UPS to command. The
+	// executor previously passed the UPS name as the address, so
+	// post-shutdown tried to resolve "ups" as a hostname.
 	host := client.Address
 	if host == "" {
 		host = "localhost"
 	}
 
-	addr := netutil.HostPort(host, defaultNUTPort)
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	port := configInt(cfg, "port")
+	if port == 0 {
+		port = defaultNUTPort
+	}
+
+	upsName := configString(cfg, "ups")
+	if upsName == "" {
+		upsName = client.Name
+	}
+	if upsName == "" {
+		upsName = defaultUPSName
+	}
+
+	conn, err := dial(ctx, host, port)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to NUT: %w", err)
+		return nil, err
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	session := newSession(conn)
+	defer session.logout()
 
-	upsName := client.Name
-	fmt.Fprintf(conn, "INSTCMD %s %s\n", upsName, command)
-
-	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "OK") {
-			return &engine.ActionResult{Success: true, Message: "NUT command executed"}, nil
-		}
-		return &engine.ActionResult{Success: false, Message: line}, fmt.Errorf("NUT command failed: %s", line)
+	if err := session.authenticate(configString(cfg, "username"), configString(cfg, "password")); err != nil {
+		return nil, fmt.Errorf("authenticating to NUT at %s: %w", netutil.HostPort(host, port), err)
 	}
 
-	return nil, fmt.Errorf("no response from NUT")
+	if err := session.send("INSTCMD %s %s", upsName, command); err != nil {
+		return nil, err
+	}
+
+	line, err := session.readLine()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := checkOK(line, "INSTCMD "+command); err != nil {
+		return &engine.ActionResult{Success: false, Message: err.Error()}, err
+	}
+
+	t.logger.Info("NUT instant command accepted",
+		"ups", upsName, "host", host, "command", command)
+
+	return &engine.ActionResult{
+		Success: true,
+		Message: fmt.Sprintf("NUT accepted %s for %s", command, upsName),
+	}, nil
 }
 
 func (t *NUTTransport) Probe(ctx context.Context, client *engine.Client) (engine.ClientState, error) {
-	return engine.StateUnknown, fmt.Errorf("NUT transport does not support probe")
+	return engine.StateUnknown, fmt.Errorf("nut transport does not support probe")
+}
+
+func configString(cfg map[string]any, key string) string {
+	if cfg == nil {
+		return ""
+	}
+	s, _ := cfg[key].(string)
+	return s
+}
+
+func configInt(cfg map[string]any, key string) int {
+	if cfg == nil {
+		return 0
+	}
+	switch v := cfg[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
 }
