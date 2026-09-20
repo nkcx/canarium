@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -252,51 +254,119 @@ func printDoctorReport(report *doctor.Report) {
 func simulateCmd(configPath *string) *cobra.Command {
 	var planName string
 	var timelinePath string
+	var asJSON bool
 
 	cmd := &cobra.Command{
 		Use:   "simulate",
 		Short: "Simulate a plan against a fact timeline",
+		Long: "Replay a scripted sequence of fact changes against a plan's policy.\n\n" +
+			"Reports when the plan would trigger, when each stage's entry condition\n" +
+			"would be satisfied, when abort would win, when the point of no return\n" +
+			"would be crossed, and when the wake gate would open.\n\n" +
+			"This simulates policy, not execution: it says nothing about whether a\n" +
+			"transport authenticates or how long a host takes to shut down. Use\n" +
+			"`canarium doctor` for that.",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			logger := newLogger(os.Stderr, slog.LevelWarn)
+
+			cfg, result, err := loadAndValidate(*configPath, logger, config.LoadOptions{
+				AllowMissingEnv: true,
+			})
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
-
-			result := config.Validate(cfg)
 			if result.HasErrors() {
+				reportValidation(result, false)
 				return fmt.Errorf("config validation failed")
 			}
 
-			tl, err := simulate.LoadTimeline(timelinePath)
+			timeline, err := simulate.LoadTimeline(timelinePath)
 			if err != nil {
 				return fmt.Errorf("loading timeline: %w", err)
 			}
 
-			logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-				Level: slog.LevelInfo,
-			}))
+			// Simulation output is the point of the command, so it goes to
+			// stdout at info level regardless of the daemon's log level.
+			simLogger := newLogger(os.Stdout, slog.LevelInfo)
+			if asJSON {
+				simLogger = newLogger(io.Discard, slog.LevelError)
+			}
 
-			simResult, err := simulate.Run(cfg, tl, planName, logger)
+			simResult, err := simulate.Run(cfg, timeline, planName, simLogger)
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("\nSimulation complete:\n")
-			fmt.Printf("  Triggers:   %d\n", len(simResult.Triggers))
-			fmt.Printf("  Stages:     %d\n", len(simResult.Stages))
-			fmt.Printf("  Aborts:     %d\n", len(simResult.Aborts))
-			fmt.Printf("  Wake gates: %d\n", len(simResult.WakeGates))
+			if asJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(simResult)
+			}
 
+			printSimulationSummary(simResult, timeline)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&planName, "plan", "", "plan name to simulate")
 	cmd.Flags().StringVar(&timelinePath, "timeline", "", "path to timeline JSON file")
-	cmd.MarkFlagRequired("plan")
-	cmd.MarkFlagRequired("timeline")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the result as JSON")
+
+	if err := cmd.MarkFlagRequired("plan"); err != nil {
+		panic(err) // only fails for a flag that does not exist
+	}
+	if err := cmd.MarkFlagRequired("timeline"); err != nil {
+		panic(err)
+	}
 
 	return cmd
+}
+
+// printSimulationSummary renders a human-readable result.
+func printSimulationSummary(r *simulate.SimulationResult, tl *simulate.Timeline) {
+	fmt.Printf("\nSimulation of plan %q over %s:\n\n", r.Plan, tl.Duration.Duration())
+
+	fmt.Printf("  Triggered:   %s\n", describeEvents(r.Triggers))
+	fmt.Printf("  Stages run:  %s\n", describeEvents(r.Stages))
+	fmt.Printf("  PONR:        %s\n", describeEvents(r.PONR))
+	fmt.Printf("  Aborted:     %s\n", describeEvents(r.Aborts))
+	fmt.Printf("  Wake gate:   %s\n", describeEvents(r.WakeGates))
+
+	if len(r.ShutdownOrder) > 0 {
+		fmt.Printf("\n  Would shut down, in order: %s\n", strings.Join(r.ShutdownOrder, ", "))
+	}
+
+	if len(r.NotShutDown) > 0 {
+		fmt.Printf("\n  WOULD NOT BE SHUT DOWN: %s\n", strings.Join(r.NotShutDown, ", "))
+		for _, e := range r.Skipped {
+			fmt.Printf("    stage %q skipped at %s: %s\n", e.Stage, e.At, e.Detail)
+		}
+	}
+
+	if !r.Completed {
+		fmt.Printf("\n  The timeline ended before the wake gate opened. " +
+			"Either it is too short, or the gate's conditions were never met.\n")
+	}
+
+	fmt.Println()
+}
+
+func describeEvents(events []simulate.Event) string {
+	if len(events) == 0 {
+		return "never"
+	}
+
+	parts := make([]string, 0, len(events))
+	for _, e := range events {
+		label := e.Stage
+		if label == "" {
+			label = e.Detail
+		}
+		parts = append(parts, fmt.Sprintf("%s at %s", label, e.At))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func runDaemon(configPath string) error {

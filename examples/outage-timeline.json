@@ -1,0 +1,106 @@
+{
+  "duration": "2h",
+  "step": "30s",
+  "events": [
+    {
+      "at": "0s",
+      "fact": "rack_ups.status",
+      "value": [
+        "OL"
+      ]
+    },
+    {
+      "at": "0s",
+      "fact": "rack_ups.battery.charge",
+      "value": 100
+    },
+    {
+      "at": "0s",
+      "fact": "rack_ups.battery.runtime",
+      "value": 3600
+    },
+    {
+      "at": "2m",
+      "fact": "rack_ups.status",
+      "value": [
+        "OB",
+        "DISCHRG"
+      ]
+    },
+    {
+      "at": "10m",
+      "fact": "rack_ups.battery.charge",
+      "value": 72
+    },
+    {
+      "at": "10m",
+      "fact": "rack_ups.battery.runtime",
+      "value": 2400
+    },
+    {
+      "at": "20m",
+      "fact": "rack_ups.battery.charge",
+      "value": 48
+    },
+    {
+      "at": "20m",
+      "fact": "rack_ups.battery.runtime",
+      "value": 1500
+    },
+    {
+      "at": "30m",
+      "fact": "rack_ups.battery.charge",
+      "value": 33
+    },
+    {
+      "at": "30m",
+      "fact": "rack_ups.battery.runtime",
+      "value": 900
+    },
+    {
+      "at": "40m",
+      "fact": "rack_ups.battery.charge",
+      "value": 22
+    },
+    {
+      "at": "40m",
+      "fact": "rack_ups.battery.runtime",
+      "value": 450
+    },
+    {
+      "at": "50m",
+      "fact": "rack_ups.status",
+      "value": [
+        "OL",
+        "CHRG"
+      ]
+    },
+    {
+      "at": "60m",
+      "fact": "rack_ups.battery.charge",
+      "value": 45
+    },
+    {
+      "at": "70m",
+      "fact": "rack_ups.battery.charge",
+      "value": 65
+    },
+    {
+      "at": "80m",
+      "fact": "rack_ups.battery.charge",
+      "value": 85
+    },
+    {
+      "at": "90m",
+      "fact": "rack_ups.status",
+      "value": [
+        "OL"
+      ]
+    },
+    {
+      "at": "90m",
+      "fact": "rack_ups.battery.charge",
+      "value": 100
+    }
+  ]
+}
