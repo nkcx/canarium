@@ -1,10 +1,13 @@
 # Canarium + NUT deployment
 #
 # Prerequisites:
-#   1. Find your UPS USB device: lsusb | grep -i ups
-#   2. Copy .env.example to .env and fill in your values
-#   3. Uncomment the `devices:` entry under the nut service for your UPS
-#   4. docker compose up -d
+#   1. Copy .env.example to .env and fill in your values
+#   2. Confirm your UPS is visible on the host: lsusb | grep -i ups
+#   3. docker compose up -d
+#
+# USB passthrough is configured out of the box and does not need privileged
+# mode; see the notes on the nut service below if your host enforces
+# SELinux.
 #
 # NUT configuration:
 #   For most USB-connected UPS units, the env vars below are sufficient.
@@ -52,19 +55,43 @@ services:
     # (e.g. "127.0.0.1:3493:3493") over 0.0.0.0.
     # ports:
     #   - "3493:3493"
+
+    # ---------------------------------------------------------------------
+    # USB passthrough for a locally connected UPS, without privileged mode.
     #
-    # USB passthrough — required for a locally connected UPS.
-    # Find your device with: lsusb | grep -i ups
-    # Example: Bus 001 Device 004 -> /dev/bus/usb/001/004
+    # Three separate things block a non-privileged container from reaching a
+    # USB UPS, and all three have to be addressed:
     #
-    # Uncomment and set the path for your UPS:
-    # devices:
-    #   - /dev/bus/usb/001/004:/dev/bus/usb/001/004
+    #   1. The device node must be visible in the container. Mounting the
+    #      whole /dev/bus/usb tree rather than a single device path is
+    #      deliberate: USB devices re-enumerate after a bus reset, a UPS
+    #      power cycle, or a host reboot, which changes the Bus/Device
+    #      numbers. A `devices:` entry pinned to /dev/bus/usb/001/004 breaks
+    #      the moment that happens, and needing to survive re-enumeration is
+    #      the usual reason people reach for privileged mode.
     #
-    # `privileged: true` also works and survives USB re-enumeration, but it
-    # grants the container full access to every host device. Prefer the
-    # explicit `devices:` mapping above unless re-enumeration is a real
-    # problem for your hardware.
+    #   2. The container's cgroup device policy must allow the access. USB
+    #      character devices are major number 189, so one rule covers every
+    #      port on the bus. Without this the node is visible but every
+    #      open() returns EPERM.
+    #
+    #   3. On SELinux-enforcing hosts — Fedora IoT, Fedora CoreOS, RHEL —
+    #      the container process is confined to a type that cannot read
+    #      device nodes under /dev/bus/usb. The access is denied by the
+    #      kernel with nothing useful in the container logs; look in the
+    #      host's audit log (ausearch -m AVC -ts recent) to confirm.
+    #
+    # label:disable turns off SELinux confinement for this container only.
+    # That is a real reduction in isolation and worth understanding, but it
+    # is far narrower than `privileged: true`, which would additionally grant
+    # every capability, all devices, and unrestricted access to host
+    # kernel interfaces.
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+    security_opt:
+      - label:disable
 
   canarium:
     image: ghcr.io/nkcx/canarium:latest
