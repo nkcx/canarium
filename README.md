@@ -26,8 +26,9 @@ NUT monitors your UPS. Commercial suites are vendor-locked. Homelab scripts don'
 - **Ordered shutdown** -- staged transitions with dependency awareness, entry conditions, and point-of-no-return
 - **Verified wake** -- WOL with retry and probe verification, staggered to manage inrush, per-client wake policy
 - **Abort and resume** -- power comes back mid-shutdown? Canarium stops, waits for in-flight shutdowns to complete, then starts bringing things back up
-- **Safety first** -- losing contact with a sensor never triggers a shutdown; three operating modes (disarmed, dry-run, armed) so you can watch before you trust
-- **Simulation** -- replay recorded or scripted outage timelines against your plans without touching anything real
+- **Safety first** -- stale or unknown facts never satisfy a condition, so losing contact with a sensor cannot trigger a shutdown; three operating modes (disarmed, dry-run, armed) so you can watch before you trust
+- **Simulation** -- replay scripted outage timelines against your plans without touching anything real, including which hosts *wouldn't* get shut down
+- **Preflight** -- `canarium doctor` contacts everything your config names, so a bad credential surfaces on a Tuesday rather than during an outage
 - **Web UI** -- see what's happening, what would happen, and what did happen
 - **Runs anywhere** -- single Go binary with embedded UI, targets a Raspberry Pi 3 with a 128 MB memory ceiling
 
@@ -37,15 +38,32 @@ NUT monitors your UPS. Commercial suites are vendor-locked. Homelab scripts don'
 # Build
 make build
 
-# Validate config
+# Check the config offline: transports, fact references, expressions,
+# client references, dependency ordering. No network access.
 ./canarium validate -c examples/basic.yaml
+
+# Check it against reality: can sources authenticate and report? do client
+# addresses resolve and answer? are credentials present?
+./canarium doctor -c config.yaml
+
+# Replay a scripted outage against a plan, without touching anything
+./canarium simulate --plan outage --timeline examples/outage-timeline.json -c config.yaml
 
 # Run (starts in disarmed mode -- watches but doesn't act)
 ./canarium run -c config.yaml
-
-# Simulate a plan against a scripted outage
-./canarium simulate --plan outage --timeline timeline.json -c config.yaml
 ```
+
+Other commands:
+
+```bash
+./canarium hash-password              # for canarium.auth.password_hash
+./canarium token create ci --scope read   # API token for monitoring
+./canarium token list
+./canarium token revoke ci
+```
+
+On first run, open the web UI and set an admin password. Until you do, the
+API rejects every request -- Canarium does not run unauthenticated.
 
 ## Docker (with NUT)
 
@@ -59,11 +77,18 @@ cp examples/basic.yaml canarium.yaml  # edit with your clients and plans
 # 2. Find your UPS USB device
 lsusb | grep -i ups            # note the Bus/Device numbers
 
-# 3. Update compose.yaml with your USB device path (or use privileged mode)
-
-# 4. Deploy
+# 3. Deploy
 docker compose up -d
 ```
+
+**USB passthrough.** The compose file passes the UPS through without
+privileged mode. Three things have to line up, and it does all three:
+`/dev/bus/usb` is bind-mounted whole (so a UPS that re-enumerates does not
+break the mapping), `device_cgroup_rules` grants access to USB character
+devices (major 189), and SELinux confinement is disabled for that container
+-- on Fedora IoT, Fedora CoreOS and RHEL the container type otherwise cannot
+read device nodes under `/dev/bus/usb`, and the denial appears only in the
+host's audit log (`ausearch -m AVC -ts recent`).
 
 NUT is configured via environment variables in `.env` -- no separate config files needed for standard USB UPS setups. For advanced configurations (custom drivers, SNMP UPS, multiple units), mount config files into the NUT container's `/etc/nut/local/` directory.
 
@@ -87,14 +112,64 @@ Sources → Fact Context → Policy → Planner → Executor → Transports
 
 **Sources** produce environmental facts (battery charge, temperature, status flags). **Policy** evaluates conditions against those facts with optional dwell requirements ("battery above 60% for 5 minutes"). **Plans** define staged shutdown and wake sequences. **Transports** execute actions against your infrastructure (SSH, Proxmox API, WOL, SNMP PoE, etc).
 
-**Core modules:** NUT, SNMP, SSH, WOL, exec, REST, GPIO, webhook
+**Sources** (produce facts): NUT, SNMP, GPIO
 
-**Shipped transports:** Proxmox, TrueNAS, OPNsense
+**Transports** (act on clients): SSH, WOL, exec, REST, SNMP PoE, NUT outlet,
+Proxmox, TrueNAS, OPNsense
+
+**Notifications:** webhook
+
+### Multi-UPS
+
+Clients declare which UPS feeds them, and a policy for what that means:
+
+```yaml
+clients:
+  - name: hypervisor
+    feeds: [rack_ups_a, rack_ups_b]
+    feed_policy: all        # dual-PSU: only threatened when both are failing
+  - name: nas
+    feeds: [rack_ups_a]
+    feed_policy: any        # single-PSU (the default)
+```
+
+Canarium derives a `client.<name>.threatened` fact from this, which stages can
+condition on. If a feed's status cannot be read, the client is treated as *not*
+threatened -- losing a sensor never starts a shutdown. Set
+`comms_loss_assumes: threatened` per client to invert that.
 
 ## Security notes
 
-- **SSH host key verification:** The SSH transport currently uses `InsecureIgnoreHostKey()`. This is a known limitation for v1 -- host key verification against a known_hosts file is planned for a future release.
-- **TLS:** Canarium does not terminate TLS directly. Use a reverse proxy (Traefik, nginx, Caddy) for HTTPS.
-- **Auth:** v1 ships with single local admin authentication. Federated auth (OIDC, LDAP) is planned for v2.
+- **Authentication fails closed.** Until an admin password is set, every
+  authenticated endpoint refuses requests. The web UI's first-run screen
+  creates one; `canarium hash-password` pins one in the config file instead,
+  for immutable deployments.
+
+- **SSH host keys are verified.** The default policy is `accept-new`: a host's
+  key is learned on first contact and pinned thereafter, and a subsequent
+  change is refused. Set `transports.ssh.host_key_policy: strict` to require
+  keys be present in `known_hosts` up front. Learned keys live in
+  `<data_dir>/known_hosts`.
+
+- **TLS certificates are verified** for the Proxmox, TrueNAS and OPNsense
+  transports. Appliances with self-signed certificates need one of:
+
+  ```yaml
+  config:
+    tls_ca_cert: /etc/canarium/nas-ca.pem     # pin the appliance's cert
+    # or, accepting the risk knowingly:
+    tls_insecure_skip_verify: true
+  ```
+
+- **Canarium terminates no TLS of its own.** Put it behind a reverse proxy
+  (Traefik, nginx, Caddy) for HTTPS, and set
+  `canarium.auth.trust_proxy_headers: true` so session cookies are marked
+  `Secure`. The shipped compose file binds the API to localhost.
+
+- **API tokens** carry a scope: `read` can observe, `admin` can arm the
+  executor and abort sequences. Give monitoring a read token.
+
+- **Auth is a single local admin.** Federated auth (OIDC, LDAP) is not
+  implemented.
 
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.

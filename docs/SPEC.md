@@ -1,3 +1,15 @@
+> **Implementation status.** This specification describes the intended design.
+> Several sections were written ahead of the implementation and, for a period,
+> described behaviour the code did not have — notably stale-fact handling
+> (§4.3-4.4), monotonic dwell tracking (§5.3), multi-UPS feed policy (§6.2-6.3)
+> and point-of-no-return semantics (§7.4). Those are now implemented as
+> written. Where the spec and the code disagree, the code is the authority and
+> the disagreement is a bug in one of them; please report it.
+>
+> Not implemented: in-sequence condition latching (§4.4), the plan editor and
+> condition builder in the web UI (§11), forced WAL checkpoints on critical
+> writes (§10), and federated auth.
+
 # Canarium — Product Specification
 
 **Version:** 0.3

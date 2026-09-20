@@ -4,6 +4,56 @@ This guide walks through configuring and deploying Canarium. For the full techni
 
 ---
 
+> **Upgrading an existing install?** See [UPGRADING.md](UPGRADING.md) — TLS
+> verification, SSH host key checking and strict config parsing are now on by
+> default, and several config fields that previously did nothing now work.
+
+## Checking your work
+
+Three commands, in increasing order of how much they touch:
+
+```bash
+canarium validate -c config.yaml   # offline; structure, references, expressions
+canarium doctor   -c config.yaml   # contacts everything the config names
+canarium simulate -c config.yaml --plan outage --timeline timeline.json
+```
+
+`validate` is deterministic and needs no network, so it belongs in CI. It
+checks that transports and source types exist in this build, that every client
+and tag reference resolves, that fact references match what your sources
+declare, that template expressions type-check, and that stage ordering is
+consistent with declared dependencies.
+
+`doctor` contacts things: it starts each source and requires it to produce
+facts, resolves and probes each client address, and checks that credentials
+are present and TLS is verified. Run it after changing anything — the point is
+that a bad credential surfaces on a Tuesday afternoon rather than during an
+outage.
+
+`simulate` replays a scripted timeline against a plan's policy and reports
+when it would trigger, which stages would run, when the point of no return
+would be crossed, and — most usefully — which hosts would be left running
+because a stage's entry condition never held. See
+`examples/outage-timeline.json`.
+
+## API tokens
+
+For monitoring and automation, rather than sharing the admin password:
+
+```bash
+canarium token create prometheus --scope read
+canarium token list
+canarium token revoke prometheus
+```
+
+A `read` token can observe the daemon but cannot arm it, abort a sequence, or
+force a held stage through. Use:
+
+```bash
+curl -H 'Authorization: Bearer <token>' http://localhost:8420/api/status
+```
+
+
 ## What Canarium does
 
 Canarium monitors environmental conditions — power loss, temperature, UPS state — and orchestrates the orderly transition of your infrastructure from up to down. When those conditions clear, it brings everything back up again, in the right order, verified and safe.

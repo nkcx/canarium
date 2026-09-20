@@ -1,8 +1,35 @@
 canarium:
+  # disarmed | dry-run | armed. Start disarmed and watch before you trust it.
   mode: disarmed
   host: 0.0.0.0:8420
   data_dir: /var/lib/canarium
+
+  # How long finished sequences are kept. 0 keeps them forever.
   journal_retain: 30d
+
+  auth:
+    # Set this when Canarium is reachable only through a reverse proxy, so
+    # session cookies are marked Secure. Leave it off if the daemon can be
+    # reached directly: the header is attacker-controlled.
+    trust_proxy_headers: false
+
+    # Pin the admin password here instead of the database, for deployments
+    # whose data directory is ephemeral. Generate with: canarium hash-password
+    # password_hash: "$2a$12$..."
+
+  # Refuse runtime changes to settings this file declares, for GitOps-style
+  # deployments where the next deploy would revert them anyway.
+  # config_readonly: true
+
+# Defaults for the transports. Individual clients override these in their
+# own config: block.
+transports:
+  ssh:
+    user: root
+    key_path: /etc/canarium/id_ed25519
+    # accept-new learns each host's key on first contact and pins it.
+    # strict requires keys to be present in known_hosts up front.
+    host_key_policy: accept-new
 
 # NUT source — connects to the nut-upsd container (or any NUT server).
 # When using compose.yaml, the host is the service name "nut".
@@ -16,6 +43,8 @@ sources:
           host: nut
           port: 3493
           ups: ups
+          # Required by any NUT server that is not wide open, and always
+          # required for the instant commands post_shutdown uses.
           username: canarium
           password: ${NUT_PASSWORD}
           poll_interval: 15s
@@ -28,11 +57,19 @@ clients:
     mac: "aa:bb:cc:dd:ee:01"
     credentials: ${PROXMOX_TOKEN}
     tags: [compute]
+    # Which UPS feeds this machine. feed_policy: any (the default) means a
+    # single-PSU host, threatened as soon as its one feed is.
     feeds: [rack_ups]
+    feed_policy: any
     shutdown_budget: 3m
     probe:
       method: tcp
       port: 22
+    config:
+      # Proxmox ships a self-signed certificate. Pin it rather than skipping
+      # verification: the API token below controls the whole hypervisor.
+      # tls_ca_cert: /etc/canarium/proxmox-ca.pem
+      tls_insecure_skip_verify: true
     wake:
       transport: wol
       broadcast: 10.0.10.255    # target subnet for WOL; set per VLAN
@@ -63,6 +100,9 @@ clients:
     probe:
       method: tcp
       port: 443
+    config:
+      # tls_ca_cert: /etc/canarium/truenas-ca.pem
+      tls_insecure_skip_verify: true
     wake:
       transport: wol
       mac: "aa:bb:cc:dd:ee:10"
@@ -80,6 +120,9 @@ clients:
     probe:
       method: tcp
       port: 443
+    config:
+      # tls_ca_cert: /etc/canarium/opnsense-ca.pem
+      tls_insecure_skip_verify: true
 
 plans:
   - name: outage
@@ -98,6 +141,12 @@ plans:
     shutdown:
       stages:
         - name: compute
+          # If this condition has not held within wait_timeout, wait_policy
+          # decides what happens. "skip" (the default) abandons the stage and
+          # these clients are never shut down; "hold" waits indefinitely for
+          # the condition or for an operator to force it through.
+          wait_policy: hold
+          wait_timeout: 30m
           when:
             condition: or
             conditions:
