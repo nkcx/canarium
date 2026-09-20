@@ -11,23 +11,6 @@ import (
 	"github.com/nkcx/canarium/internal/state"
 )
 
-const (
-	// stagePollInterval is how often a stage's `when` condition and the
-	// plan's abort condition are re-evaluated while waiting.
-	stagePollInterval = 2 * time.Second
-
-	// shutdownProbeInterval is how often a client is probed while waiting
-	// for it to go down.
-	shutdownProbeInterval = 5 * time.Second
-
-	// wakeGatePollInterval is how often the wake gate is re-evaluated.
-	wakeGatePollInterval = 10 * time.Second
-
-	// dryRunStepDelay stands in for the time a real action would take, so a
-	// dry run exercises sequencing at roughly realistic pacing.
-	dryRunStepDelay = 1 * time.Second
-)
-
 // executeSequence runs a plan from the beginning.
 func (e *Executor) executeSequence(plan *config.PlanConfig) {
 	now := time.Now()
@@ -97,11 +80,6 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 		as.SetCurrentStage(i)
 		e.saveSequence(as)
 
-		if stage.PointOfNoReturn && as.CrossPonr() {
-			e.saveSequence(as)
-			e.emit(Event{Type: "ponr_crossed", Timestamp: time.Now(), Data: stage.Name})
-		}
-
 		if e.shouldAbort(as) {
 			e.handleAbort(as)
 			return
@@ -132,6 +110,26 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 			default:
 				continue
 			}
+		}
+
+		// The point of no return is crossed here — once the stage's entry
+		// condition has been met and we are about to dispatch — not when the
+		// loop reaches the stage.
+		//
+		// Crossing it on entry meant abort was disabled for the entire wait,
+		// which defaults to an hour. With point_of_no_return on the first
+		// stage, as the shipped example config has it, abort was disabled the
+		// instant the plan triggered: mains power returning a second later
+		// would not stop the shutdown, defeating the feature the README
+		// leads with. SPEC §7.4 is explicit that abort is ignored only once
+		// a PONR stage *begins*.
+		//
+		// A stage skipped by wait_policy never reaches this point, so
+		// skipping a PONR stage correctly leaves the sequence abortable.
+		if stage.PointOfNoReturn && as.CrossPonr() {
+			e.saveSequence(as)
+			e.logger.Info("point of no return crossed", "stage", stage.Name, "sequence", as.ID())
+			e.emit(Event{Type: "ponr_crossed", Timestamp: time.Now(), Data: stage.Name})
 		}
 
 		e.emit(Event{Type: "stage_start", Timestamp: time.Now(), Data: stage.Name})
@@ -185,7 +183,7 @@ func (e *Executor) waitForStage(as *ActiveSequence, stage *config.StageConfig) s
 		select {
 		case <-e.ctx.Done():
 			return stageCancelled
-		case <-time.After(stagePollInterval):
+		case <-time.After(e.timings.StagePoll):
 		}
 	}
 }
@@ -318,7 +316,7 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 		intent.Result = &state.ActionResult{Success: true, Message: "dry-run"}
 		e.saveIntent(intent)
 
-		e.sleep(dryRunStepDelay)
+		e.sleep(e.timings.DryRunStep)
 		e.setClientState(name, StateDown, &seqID)
 		return finish(StateDown, "")
 	}
@@ -379,7 +377,7 @@ func (e *Executor) awaitClientDown(
 		case <-ctx.Done():
 			e.setClientState(name, StateDownUnverified, seqID)
 			return finish(StateDownUnverified, "budget expired before the host was confirmed down")
-		case <-time.After(shutdownProbeInterval):
+		case <-time.After(e.timings.ShutdownProbe):
 		}
 	}
 
@@ -434,7 +432,7 @@ func (e *Executor) waitForShuttingDown(as *ActiveSequence) {
 			if deadline.IsZero() {
 				break
 			}
-			if !e.sleep(shutdownProbeInterval) {
+			if !e.sleep(e.timings.ShutdownProbe) {
 				return
 			}
 		}
@@ -453,7 +451,7 @@ func (e *Executor) runWake(as *ActiveSequence) {
 		if e.evaluator.Evaluate(&plan.Wake.Gate, time.Now()) == facts.True {
 			break
 		}
-		if !e.sleep(wakeGatePollInterval) {
+		if !e.sleep(e.timings.WakeGatePoll) {
 			e.logger.Info("wake gate wait interrupted by shutdown", "sequence", as.ID())
 			e.clearActiveSequence()
 			return
@@ -583,7 +581,7 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 
 	if e.Mode() == ModeDryRun {
 		e.logger.Info("[dry-run] would wake", "client", name)
-		e.sleep(dryRunStepDelay)
+		e.sleep(e.timings.DryRunStep)
 		e.setClientState(name, StateUp, &seqID)
 		return
 	}

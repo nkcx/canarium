@@ -12,18 +12,52 @@ import (
 	"github.com/nkcx/canarium/internal/state"
 )
 
-const (
-	// probeInterval is how often client reachability is sampled.
-	probeInterval = 30 * time.Second
+// Timings groups the executor's polling intervals.
+//
+// They are a struct rather than constants so tests can compress them: the
+// production values are chosen for a daemon that runs for months, and a test
+// asserting stage ordering should not have to wait two seconds per poll.
+// Nothing in production overrides DefaultTimings.
+type Timings struct {
+	// Probe is how often client reachability is sampled.
+	Probe time.Duration
 
-	// policyInterval is how often plan triggers are evaluated.
-	policyInterval = 5 * time.Second
+	// Policy is how often plan triggers are evaluated.
+	Policy time.Duration
 
-	// qualityRefreshInterval is how often fact freshness is recomputed. It
-	// is shorter than the shortest realistic source poll interval so a fact
-	// is marked stale promptly after its source stops reporting.
-	qualityRefreshInterval = 5 * time.Second
-)
+	// QualityRefresh is how often fact freshness is recomputed. It is
+	// shorter than the shortest realistic source poll interval so a fact is
+	// marked stale promptly after its source stops reporting.
+	QualityRefresh time.Duration
+
+	// StagePoll is how often a stage's entry condition and the plan's abort
+	// condition are re-evaluated while waiting.
+	StagePoll time.Duration
+
+	// ShutdownProbe is how often a client is probed while waiting for it to
+	// go down.
+	ShutdownProbe time.Duration
+
+	// WakeGatePoll is how often the wake gate is re-evaluated.
+	WakeGatePoll time.Duration
+
+	// DryRunStep stands in for the time a real action would take, so a dry
+	// run exercises sequencing at roughly realistic pacing.
+	DryRunStep time.Duration
+}
+
+// DefaultTimings returns the production polling intervals.
+func DefaultTimings() Timings {
+	return Timings{
+		Probe:          30 * time.Second,
+		Policy:         5 * time.Second,
+		QualityRefresh: 5 * time.Second,
+		StagePoll:      2 * time.Second,
+		ShutdownProbe:  5 * time.Second,
+		WakeGatePoll:   10 * time.Second,
+		DryRunStep:     1 * time.Second,
+	}
+}
 
 type Executor struct {
 	cfg        *config.Config
@@ -33,6 +67,7 @@ type Executor struct {
 	transports map[string]Transport
 	mode       Mode
 	logger     *slog.Logger
+	timings    Timings
 
 	mu             sync.RWMutex
 	activeSequence *ActiveSequence
@@ -67,10 +102,19 @@ func NewExecutor(
 		transports:   make(map[string]Transport),
 		mode:         ParseMode(cfg.Canarium.Mode),
 		logger:       logger,
+		timings:      DefaultTimings(),
 		clientStates: make(map[string]ClientState),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
+}
+
+// SetTimings overrides the polling intervals. Intended for tests; call it
+// before Start.
+func (e *Executor) SetTimings(t Timings) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.timings = t
 }
 
 func (e *Executor) RegisterTransport(name string, t Transport) {
@@ -242,7 +286,7 @@ func (e *Executor) restoreState() error {
 }
 
 func (e *Executor) probeLoop() {
-	ticker := time.NewTicker(probeInterval)
+	ticker := time.NewTicker(e.timings.Probe)
 	defer ticker.Stop()
 
 	e.probeAllClients()
@@ -307,7 +351,7 @@ func (e *Executor) probeAllClients() {
 // "good" forever, however long its source had been dead. Freshness is an
 // observation about the world, not a policy decision, so it runs always.
 func (e *Executor) qualityLoop() {
-	ticker := time.NewTicker(qualityRefreshInterval)
+	ticker := time.NewTicker(e.timings.QualityRefresh)
 	defer ticker.Stop()
 
 	e.store.RefreshQuality(time.Now())
@@ -323,7 +367,7 @@ func (e *Executor) qualityLoop() {
 }
 
 func (e *Executor) policyLoop() {
-	ticker := time.NewTicker(policyInterval)
+	ticker := time.NewTicker(e.timings.Policy)
 	defer ticker.Stop()
 
 	for {
