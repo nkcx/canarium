@@ -37,7 +37,7 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", expandVars(cmdStr, client))
+	cmd := newCommand(ctx, expandVars(cmdStr, client))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return &engine.ActionResult{
@@ -50,6 +50,28 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		Success: true,
 		Message: strings.TrimSpace(string(output)),
 	}, nil
+}
+
+// waitDelay bounds how long Wait blocks after cancellation for output pipes
+// still held open by a descendant process.
+const waitDelay = 2 * time.Second
+
+// newCommand builds a shell command bounded by ctx.
+//
+// The command runs through `sh -c`, so it accepts pipelines and redirection
+// as an operator would expect. That means the command string is shell syntax
+// by design: it comes from the configuration file, which is already trusted
+// to specify what gets shut down and how.
+func newCommand(ctx context.Context, command string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+
+	isolateProcess(cmd)
+
+	// Even after the process group is killed, Wait can block on output pipes.
+	// WaitDelay bounds that so a hung command cannot outlive its budget.
+	cmd.WaitDelay = waitDelay
+
+	return cmd
 }
 
 // expandVars substitutes client placeholders into a command string.
@@ -76,7 +98,7 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 		return engine.StateUnknown, fmt.Errorf("exec transport: no probe_command configured")
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", expandVars(cmdStr, client))
+	cmd := newCommand(ctx, expandVars(cmdStr, client))
 	err := cmd.Run()
 	if err == nil {
 		return engine.StateUp, nil
