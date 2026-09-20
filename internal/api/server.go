@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -247,10 +246,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inputHash := hashPassword(req.Password)
-	if subtle.ConstantTimeCompare([]byte(inputHash), []byte(storedHash)) != 1 {
+	valid, needsUpgrade := verifyPassword(storedHash, req.Password)
+	if !valid {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 		return
+	}
+
+	// Transparently migrate a legacy unsalted SHA-256 hash to bcrypt now that
+	// we hold the plaintext. A failure here must not block the login.
+	if needsUpgrade {
+		if upgraded, err := hashPassword(req.Password); err != nil {
+			s.logger.Error("re-hashing legacy password", "error", err)
+		} else if err := s.db.SetPasswordHash(upgraded); err != nil {
+			s.logger.Error("storing upgraded password hash", "error", err)
+		} else {
+			s.logger.Info("upgraded stored password hash from legacy SHA-256 to bcrypt")
+		}
 	}
 
 	token, err := newSessionToken()
@@ -293,13 +304,21 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Password) < 8 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password must be at least 8 characters"})
+	if len(req.Password) < MinPasswordLength {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("password must be at least %d characters", MinPasswordLength),
+		})
 		return
 	}
 
-	hash := hashPassword(req.Password)
+	hash, err := hashPassword(req.Password)
+	if err != nil {
+		s.logger.Error("hashing password", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 	if err := s.db.SetPasswordHash(hash); err != nil {
+		s.logger.Error("saving password hash", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save password"})
 		return
 	}
@@ -350,11 +369,6 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
-}
-
-func hashPassword(password string) string {
-	h := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(h[:])
 }
 
 // sessionKey is the kv-table key under which a session's expiry is stored.
