@@ -13,11 +13,18 @@ import (
 
 // bcryptCost is the work factor for password hashing.
 //
-// Canarium's documented deployment target is a Raspberry Pi 3, where cost 12
-// takes roughly a second. Cost 10 is bcrypt's default and keeps login
-// responsive on that hardware while remaining far beyond the reach of the
-// offline attack that unsalted SHA-256 invited.
-const bcryptCost = 12
+// Canarium's documented deployment target is a Raspberry Pi 3, where this
+// costs roughly a second per login — acceptable for an interactive admin
+// login, and far beyond the reach of the offline attack that unsalted
+// SHA-256 invited.
+//
+// It is a var rather than a const solely so tests can lower it; see
+// TestMain. Nothing in production mutates it.
+// productionBcryptCost is the shipped work factor, kept as a constant so a
+// test can assert on it even when bcryptCost has been lowered.
+const productionBcryptCost = 12
+
+var bcryptCost = productionBcryptCost
 
 // MinPasswordLength is the shortest admin password accepted at setup.
 const MinPasswordLength = 12

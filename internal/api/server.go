@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +82,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sequence", s.requireAuth(s.handleSequence))
 	s.mux.HandleFunc("POST /api/mode", s.requireAuth(s.handleSetMode))
 	s.mux.HandleFunc("POST /api/abort", s.requireAuth(s.handleAbort))
+	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleSetup)
 	s.mux.HandleFunc("GET /api/ws", s.requireAuth(s.handleWebSocket))
@@ -290,7 +292,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	existing, _ := s.db.GetPasswordHash()
+	existing, err := s.db.GetPasswordHash()
+	if err != nil {
+		s.logger.Error("reading password hash", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 	if existing != "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "password already set"})
 		return
@@ -326,43 +333,121 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// requireAuth wraps a handler so that it is reachable only by an
+// authenticated caller.
+//
+// This fails closed. An earlier version admitted every request when no
+// password had been configured, on the assumption that an operator would set
+// one during first-run setup. Combined with a web UI that could not reach
+// the setup endpoint, that left the entire API — including the endpoint that
+// arms the executor — permanently open on a default install.
+//
+// A fresh install with no password therefore rejects every authenticated
+// endpoint and reports setupRequired, which is what drives the UI to the
+// first-run screen. /api/auth/status and /api/auth/setup stay open so that
+// bootstrap is possible; setup itself refuses once a password exists.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		storedHash, _ := s.db.GetPasswordHash()
+		storedHash, err := s.db.GetPasswordHash()
+		if err != nil {
+			s.logger.Error("reading password hash", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+
 		if storedHash == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":          "setup required",
+				"setup_required": true,
+			})
+			return
+		}
+
+		if s.authenticate(r) {
 			next(w, r)
 			return
 		}
 
-		if token := r.Header.Get("Authorization"); token != "" {
-			tokenHash := hashToken(token)
-			scope, err := s.db.ValidateAPIToken(tokenHash)
-			if err == nil && scope != "" {
-				next(w, r)
-				return
-			}
-		}
-
-		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-
-		expiryStr, err := s.db.GetKV(sessionKey(cookie.Value))
-		if err != nil || expiryStr == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid session"})
-			return
-		}
-
-		expiry, err := time.Parse(time.RFC3339, expiryStr)
-		if err != nil || time.Now().After(expiry) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired"})
-			return
-		}
-
-		next(w, r)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
+}
+
+// authenticate reports whether the request carries a valid API token or a
+// valid, unexpired session cookie. It deliberately returns only a boolean:
+// distinguishing "no credential", "unknown credential" and "expired
+// credential" to the caller would let an unauthenticated client probe for
+// valid tokens.
+func (s *Server) authenticate(r *http.Request) bool {
+	if token := bearerToken(r); token != "" {
+		scope, err := s.db.ValidateAPIToken(hashToken(token))
+		if err != nil {
+			s.logger.Error("validating API token", "error", err)
+			return false
+		}
+		if scope != "" {
+			return true
+		}
+	}
+
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return false
+	}
+
+	expiryStr, err := s.db.GetKV(sessionKey(cookie.Value))
+	if err != nil {
+		s.logger.Error("reading session", "error", err)
+		return false
+	}
+	if expiryStr == "" {
+		return false
+	}
+
+	expiry, err := time.Parse(time.RFC3339, expiryStr)
+	if err != nil {
+		s.logger.Warn("session has an unparseable expiry; treating as invalid",
+			"error", err)
+		return false
+	}
+
+	return time.Now().Before(expiry)
+}
+
+// bearerToken extracts a token from the Authorization header, accepting both
+// "Bearer <token>" and a bare token for backwards compatibility.
+func bearerToken(r *http.Request) string {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if header == "" {
+		return ""
+	}
+	if after, ok := strings.CutPrefix(header, "Bearer "); ok {
+		return strings.TrimSpace(after)
+	}
+	return header
+}
+
+// handleAuthStatus reports whether first-run setup is still required and
+// whether the caller is already authenticated. It is unauthenticated by
+// design: the UI must be able to decide between the setup screen, the login
+// screen and the dashboard before it holds any credential.
+//
+// It reveals only whether a password exists, which is not sensitive and is
+// already implied by the behaviour of every other endpoint.
+func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	storedHash, err := s.db.GetPasswordHash()
+	if err != nil {
+		s.logger.Error("reading password hash", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	setupRequired := storedHash == ""
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"setup_required":      setupRequired,
+		"authenticated":       !setupRequired && s.authenticate(r),
+		"min_password_length": MinPasswordLength,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

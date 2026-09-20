@@ -9,61 +9,129 @@ export const connected = writable(false);
 export const events = writable([]);
 export const authenticated = writable(false);
 export const needsSetup = writable(false);
+export const minPasswordLength = writable(12);
 
 const MAX_EVENTS = 100;
 
+/**
+ * Issues a request against the API.
+ *
+ * Throws on any non-2xx response so callers cannot mistake an error body for
+ * data. A 401 additionally clears the authenticated store, which sends the
+ * app back to the login screen.
+ */
 async function apiFetch(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
     ...opts,
     headers: { 'Content-Type': 'application/json', ...opts.headers },
   });
+
   if (res.status === 401) {
     authenticated.set(false);
-    throw new Error('Unauthorized');
+    const body = await readJSON(res);
+    if (body?.setup_required) needsSetup.set(true);
+    throw new ApiError(body?.error ?? 'Unauthorized', res.status);
   }
-  return res.json();
+
+  if (!res.ok) {
+    const body = await readJSON(res);
+    throw new ApiError(body?.error ?? `Request failed (HTTP ${res.status})`, res.status);
+  }
+
+  // 204 and empty bodies are valid responses; don't choke on them.
+  return readJSON(res);
 }
 
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+async function readJSON(res) {
+  try {
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Determines which screen to show: first-run setup, login, or the dashboard.
+ *
+ * This asks the server directly rather than inferring from a failed request.
+ * A previous version fell back to the unauthenticated /health endpoint when
+ * /status returned 401 and, because /health always succeeds, concluded the
+ * user was authenticated — so the login screen was unreachable and the
+ * dashboard rendered empty.
+ */
 export async function checkAuth() {
   try {
-    await apiFetch('/status');
-    authenticated.set(true);
-  } catch {
-    try {
-      const health = await apiFetch('/health');
-      if (health.status === 'ok') {
-        authenticated.set(true);
-      }
-    } catch {
-      authenticated.set(false);
+    const res = await fetch('/api/auth/status', {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const info = await res.json();
+    needsSetup.set(Boolean(info.setup_required));
+    authenticated.set(Boolean(info.authenticated));
+    if (typeof info.min_password_length === 'number') {
+      minPasswordLength.set(info.min_password_length);
     }
+  } catch (e) {
+    console.error('auth status check failed:', e);
+    needsSetup.set(false);
+    authenticated.set(false);
   }
 }
 
+/**
+ * Authenticates with the admin password.
+ * Returns { ok } on success or { ok: false, error } with a server message.
+ */
 export async function login(password) {
-  const res = await fetch('/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password }),
-  });
-  if (res.ok) {
-    authenticated.set(true);
-    return true;
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+
+    if (res.ok) {
+      authenticated.set(true);
+      needsSetup.set(false);
+      return { ok: true };
+    }
+
+    const body = await readJSON(res);
+    return { ok: false, error: body?.error ?? 'Invalid password' };
+  } catch (e) {
+    return { ok: false, error: 'Could not reach the server' };
   }
-  return false;
 }
 
+/** Sets the initial admin password, then logs in with it. */
 export async function setup(password) {
-  const res = await fetch('/api/auth/setup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password }),
-  });
-  if (res.ok) {
+  try {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+
+    if (!res.ok) {
+      const body = await readJSON(res);
+      return { ok: false, error: body?.error ?? 'Setup failed' };
+    }
+
     needsSetup.set(false);
     return login(password);
+  } catch (e) {
+    return { ok: false, error: 'Could not reach the server' };
   }
-  return false;
 }
 
 export async function refreshAll() {

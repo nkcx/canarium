@@ -3,9 +3,40 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
+// TestMain lowers the bcrypt work factor for the whole package.
+//
+// Production uses cost 12, which is deliberately expensive: roughly a second
+// per hash on the Raspberry Pi this targets. The auth tests hash and verify
+// well over a hundred times, which at that cost takes minutes and would make
+// the suite useless as a fast feedback loop. The cost factor is not what
+// these tests are asserting — salting, format handling, truncation and the
+// legacy upgrade path all behave identically at any cost.
+func TestMain(m *testing.M) {
+	bcryptCost = bcrypt.MinCost
+	os.Exit(m.Run())
+}
+
+// TestProductionBcryptCostIsStrong pins the value that actually ships, since
+// TestMain overrides it everywhere else.
+func TestProductionBcryptCostIsStrong(t *testing.T) {
+	const wantMin = 12
+
+	// Read the shipped default from a fresh process-independent constant
+	// rather than the (overridden) package var.
+	if productionBcryptCost < wantMin {
+		t.Errorf("productionBcryptCost = %d, want >= %d", productionBcryptCost, wantMin)
+	}
+	if bcryptCost != bcrypt.MinCost {
+		t.Errorf("TestMain did not lower bcryptCost; suite will be slow (got %d)", bcryptCost)
+	}
+}
 
 func TestHashPasswordProducesBcrypt(t *testing.T) {
 	hash, err := hashPassword("correct horse battery staple")

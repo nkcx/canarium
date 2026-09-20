@@ -215,6 +215,8 @@ func runDaemon(configPath string) error {
 	server := api.NewServer(cfg, store, executor, db, canarium.WebFS, logger)
 	executor.AddListener(server.EventListener())
 
+	warnIfNoAdminPassword(db, logger)
+
 	if err := executor.Start(); err != nil {
 		return fmt.Errorf("starting executor: %w", err)
 	}
@@ -244,6 +246,22 @@ func runDaemon(configPath string) error {
 	server.Stop(ctx)
 
 	return nil
+}
+
+// warnIfNoAdminPassword logs a prominent warning when no admin password has
+// been set. Until one is, every authenticated endpoint refuses requests and
+// the UI shows its first-run screen, so the daemon is not exposed — but the
+// operator needs to know the web UI is not yet usable.
+func warnIfNoAdminPassword(db *state.DB, logger *slog.Logger) {
+	hash, err := db.GetPasswordHash()
+	if err != nil {
+		logger.Error("could not determine whether an admin password is set", "error", err)
+		return
+	}
+	if hash == "" {
+		logger.Warn("no admin password is set; the API will reject all requests " +
+			"until one is created through the web UI's first-run screen")
+	}
 }
 
 func registerTransports(executor *engine.Executor, cfg *config.Config, logger *slog.Logger) {
