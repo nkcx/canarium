@@ -35,14 +35,23 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		return nil, fmt.Errorf("truenas transport does not support action %s", action)
 	}
 
-	conn, err := t.connect(client)
+	conn, err := t.connect(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to TrueNAS: %w", err)
 	}
 	defer conn.Close()
 
+	// Bound the whole exchange by the caller's deadline rather than the
+	// per-call read deadline alone.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
+	}
+
 	if err := t.authenticate(conn, client); err != nil {
-		return nil, fmt.Errorf("authentication failed: %w", err)
+		// The error may quote the request, which carries the API key.
+		return nil, fmt.Errorf("authentication failed: %s",
+			netutil.RedactSecrets(err.Error(), client.Credentials))
 	}
 
 	result, err := t.callRPC(conn, "system.shutdown", map[string]any{
@@ -84,25 +93,55 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 	}
 }
 
-func (t *Transport) connect(client *engine.Client) (*websocket.Conn, error) {
+// connect opens a WebSocket to the TrueNAS middleware API.
+//
+// There is deliberately no fallback from wss:// to ws://. The previous
+// implementation retried in plaintext whenever the TLS dial failed for any
+// reason — and TrueNAS ships a self-signed certificate by default, so the
+// common case was: verification fails, silently downgrade, and send
+// auth.login_with_api_key over an unencrypted socket. Anyone on the path
+// captured an API key with full control of the storage array, and nothing in
+// the logs said the connection had been downgraded.
+//
+// Operators with a self-signed certificate set tls_ca_cert to pin it, or
+// tls_insecure_skip_verify to accept the risk knowingly. Plaintext requires
+// setting `tls: false`, which is honest about what it does.
+func (t *Transport) connect(ctx context.Context, client *engine.Client) (*websocket.Conn, error) {
 	port := 443
 	if p, ok := client.TransportConfig["port"].(int); ok {
 		port = p
 	}
 
-	url := netutil.URL("wss", client.Address, port, "/api/current")
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+	useTLS := true
+	if v, ok := client.TransportConfig["tls"].(bool); ok {
+		useTLS = v
 	}
 
-	conn, _, err := dialer.Dial(url, nil)
-	if err != nil {
-		url = netutil.URL("ws", client.Address, port, "/api/current")
-		conn, _, err = dialer.Dial(url, nil)
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+
+	scheme := "wss"
+	if useTLS {
+		opts := netutil.TLSOptionsFrom(client.TransportConfig)
+		tlsCfg, err := opts.TLSConfig(t.logger, client.Name)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("truenas TLS configuration: %w", err)
 		}
+		dialer.TLSClientConfig = tlsCfg
+	} else {
+		scheme = "ws"
+		t.logger.Warn("connecting to TrueNAS without TLS; the API key is sent in cleartext",
+			"client", client.Name)
+	}
+
+	url := netutil.URL(scheme, client.Address, port, "/api/current")
+
+	conn, resp, err := dialer.DialContext(ctx, url, nil)
+	if err != nil {
+		status := ""
+		if resp != nil {
+			status = " (HTTP " + resp.Status + ")"
+		}
+		return nil, fmt.Errorf("dialing %s%s: %w", url, status, err)
 	}
 
 	return conn, nil
@@ -118,7 +157,12 @@ func (t *Transport) authenticate(conn *websocket.Conn, client *engine.Client) er
 		return nil
 	}
 
-	return fmt.Errorf("authentication failed: %v", result)
+	// TrueNAS 25.04+ returns a session object rather than a bare true.
+	if _, ok := result.(map[string]any); ok {
+		return nil
+	}
+
+	return fmt.Errorf("unexpected auth response: %v", result)
 }
 
 var rpcID atomic.Int64

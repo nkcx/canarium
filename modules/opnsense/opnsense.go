@@ -2,11 +2,12 @@ package opnsense
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
@@ -14,18 +15,46 @@ import (
 )
 
 type Transport struct {
-	httpClient *http.Client
+	logger *slog.Logger
+
+	mu      sync.Mutex
+	clients map[netutil.TLSOptions]*http.Client
 }
 
-func New() *Transport {
+func New(logger *slog.Logger) *Transport {
 	return &Transport{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		},
+		logger:  logger,
+		clients: make(map[netutil.TLSOptions]*http.Client),
 	}
+}
+
+// httpClientFor returns an HTTP client configured for one Canarium client's
+// TLS settings.
+//
+// Verification defaults to on. It was previously hardcoded off, so the
+// OPNsense API key and secret — sent as HTTP basic auth — travelled over a
+// connection an on-path attacker could impersonate and read.
+func (t *Transport) httpClientFor(client *engine.Client) (*http.Client, error) {
+	opts := netutil.TLSOptionsFrom(client.TransportConfig)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if c, ok := t.clients[opts]; ok {
+		return c, nil
+	}
+
+	tlsCfg, err := opts.TLSConfig(t.logger, client.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
+	t.clients[opts] = c
+	return c, nil
 }
 
 func (t *Transport) Name() string { return "opnsense" }
@@ -59,7 +88,12 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		req.SetBasicAuth(apiKey, apiSecret)
 	}
 
-	resp, err := t.httpClient.Do(req)
+	httpClient, err := t.httpClientFor(client)
+	if err != nil {
+		return nil, fmt.Errorf("opnsense TLS configuration: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return &engine.ActionResult{Success: false, Message: err.Error()}, nil
 	}

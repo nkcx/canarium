@@ -2,12 +2,13 @@ package proxmox
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
@@ -15,18 +16,52 @@ import (
 )
 
 type Transport struct {
-	httpClient *http.Client
+	logger *slog.Logger
+
+	// clients caches one *http.Client per TLS configuration. Transports are
+	// shared across clients, but TLS settings are per-client, so a single
+	// shared client cannot serve them all.
+	mu      sync.Mutex
+	clients map[netutil.TLSOptions]*http.Client
 }
 
-func New() *Transport {
+func New(logger *slog.Logger) *Transport {
 	return &Transport{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		},
+		logger:  logger,
+		clients: make(map[netutil.TLSOptions]*http.Client),
 	}
+}
+
+// httpClientFor returns an HTTP client configured for one Canarium client's
+// TLS settings.
+//
+// Verification is on by default. It was previously hardcoded to
+// InsecureSkipVerify, which meant the PVEAPIToken — a credential that can
+// shut down or reconfigure an entire hypervisor — was sent over a connection
+// any on-path attacker could impersonate. Operators with self-signed
+// certificates set tls_ca_cert to pin them, or tls_insecure_skip_verify to
+// accept the risk deliberately.
+func (t *Transport) httpClientFor(client *engine.Client) (*http.Client, error) {
+	opts := netutil.TLSOptionsFrom(client.TransportConfig)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if c, ok := t.clients[opts]; ok {
+		return c, nil
+	}
+
+	tlsCfg, err := opts.TLSConfig(t.logger, client.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}
+	t.clients[opts] = c
+	return c, nil
 }
 
 func (t *Transport) Name() string { return "proxmox" }
@@ -69,7 +104,12 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		req.Header.Set("Authorization", "PVEAPIToken="+client.Credentials)
 	}
 
-	resp, err := t.httpClient.Do(req)
+	httpClient, err := t.httpClientFor(client)
+	if err != nil {
+		return nil, fmt.Errorf("proxmox TLS configuration: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return &engine.ActionResult{Success: false, Message: err.Error()}, nil
 	}

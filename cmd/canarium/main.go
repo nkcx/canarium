@@ -279,9 +279,9 @@ func registerTransports(executor *engine.Executor, cfg *config.Config, logger *s
 	executor.RegisterTransport("wol", wol.New(wol.Config{}, logger))
 	executor.RegisterTransport("exec", execmod.New())
 	executor.RegisterTransport("rest", restmod.New())
-	executor.RegisterTransport("proxmox", proxmox.New())
+	executor.RegisterTransport("proxmox", proxmox.New(logger))
 	executor.RegisterTransport("truenas", truenas.New(logger))
-	executor.RegisterTransport("opnsense", opnsense.New())
+	executor.RegisterTransport("opnsense", opnsense.New(logger))
 	executor.RegisterTransport("nut", nutmod.NewTransport(logger))
 	executor.RegisterTransport("snmp-poe", snmpmod.NewPoeTransport(logger))
 }
