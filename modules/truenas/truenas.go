@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -105,7 +104,7 @@ func (t *Transport) connect(client *engine.Client) (*websocket.Conn, error) {
 }
 
 func (t *Transport) authenticate(conn *websocket.Conn, client *engine.Client) error {
-	result, err := t.callRPCOn(conn, "auth.login_with_api_key", []any{client.Credentials})
+	result, err := t.callRPC(conn, "auth.login_with_api_key", []any{client.Credentials})
 	if err != nil {
 		return err
 	}
@@ -120,10 +119,6 @@ func (t *Transport) authenticate(conn *websocket.Conn, client *engine.Client) er
 var rpcID atomic.Int64
 
 func (t *Transport) callRPC(conn *websocket.Conn, method string, params any) (any, error) {
-	return t.callRPCOn(conn, method, params)
-}
-
-func (t *Transport) callRPCOn(conn *websocket.Conn, method string, params any) (any, error) {
 	id := rpcID.Add(1)
 
 	msg := map[string]any{
@@ -159,5 +154,3 @@ func (t *Transport) callRPCOn(conn *websocket.Conn, method string, params any) (
 		}
 	}
 }
-
-var _ = sync.Mutex{}

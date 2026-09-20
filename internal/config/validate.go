@@ -37,8 +37,14 @@ func Validate(cfg *Config) *ValidationResult {
 	return result
 }
 
+type clientDeps struct {
+	client string
+	deps   []string
+}
+
 func validateClients(cfg *Config, result *ValidationResult) {
 	names := make(map[string]bool)
+	var deferredDeps []clientDeps
 	for _, c := range cfg.Clients {
 		if c.Name == "" {
 			result.AddError("client has no name")
@@ -72,9 +78,15 @@ func validateClients(cfg *Config, result *ValidationResult) {
 			result.AddError("client %q: invalid wake_policy: %q", c.Name, c.WakePolicy)
 		}
 
-		for _, dep := range c.DependsOn {
-			if !names[dep] && !clientExists(cfg, dep) {
-				result.AddError("client %q depends_on unknown client %q", c.Name, dep)
+		// Deferred: `names` is still being built, so a forward reference to
+		// a client declared later would be a false positive here.
+		deferredDeps = append(deferredDeps, clientDeps{client: c.Name, deps: c.DependsOn})
+	}
+
+	for _, d := range deferredDeps {
+		for _, dep := range d.deps {
+			if !names[dep] {
+				result.AddError("client %q depends_on unknown client %q", d.client, dep)
 			}
 		}
 	}
@@ -289,15 +301,6 @@ func validateConditionConfig(c *ConditionConfig, context string, result *Validat
 			result.AddError("%s: invalid 'for' duration: %s", context, err)
 		}
 	}
-}
-
-func clientExists(cfg *Config, name string) bool {
-	for _, c := range cfg.Clients {
-		if c.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func buildClientNameSet(cfg *Config) map[string]bool {

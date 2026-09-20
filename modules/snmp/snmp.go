@@ -465,21 +465,7 @@ func getConfigInt(cfg map[string]any, key string) int {
 	if cfg == nil {
 		return 0
 	}
-	v, ok := cfg[key]
-	if !ok {
-		return 0
-	}
-	switch n := v.(type) {
-	case int:
-		return n
-	case float64:
-		return int(n)
-	case string:
-		i, _ := strconv.Atoi(n)
-		return i
-	default:
-		return 0
-	}
+	return toInt(cfg[key])
 }
 
 func getConfigPortList(cfg map[string]any, key string) []portSpec {
@@ -513,6 +499,9 @@ func getConfigPortList(cfg map[string]any, key string) []portSpec {
 	return ports
 }
 
+// toInt coerces a YAML/JSON-decoded value to an int. YAML yields int,
+// JSON yields float64, and an environment-substituted value arrives as a
+// string, so all three are accepted.
 func toInt(v any) int {
 	switch n := v.(type) {
 	case int:

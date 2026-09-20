@@ -21,7 +21,6 @@ const defaultNUTPort = 3493
 type Source struct {
 	instances []InstanceConfig
 	logger    *slog.Logger
-	conns     map[string]net.Conn
 }
 
 type Config struct {
@@ -42,7 +41,6 @@ func NewSource(cfg Config, logger *slog.Logger) *Source {
 	return &Source{
 		instances: cfg.Instances,
 		logger:    logger,
-		conns:     make(map[string]net.Conn),
 	}
 }
 
@@ -80,10 +78,11 @@ func (s *Source) Start(ctx context.Context, updates chan<- engine.FactUpdate) er
 	return nil
 }
 
+// Stop releases the source's resources.
+//
+// Each poll opens and closes its own connection, so there is nothing to tear
+// down; the method exists to satisfy engine.Source.
 func (s *Source) Stop() error {
-	for _, conn := range s.conns {
-		conn.Close()
-	}
 	return nil
 }
 

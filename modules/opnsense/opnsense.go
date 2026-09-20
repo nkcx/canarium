@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
@@ -97,11 +98,8 @@ func (t *Transport) Probe(ctx context.Context, client *engine.Client) (engine.Cl
 	return engine.StateUp, nil
 }
 
-func parseCredentials(creds string) (string, string) {
-	for i := 0; i < len(creds); i++ {
-		if creds[i] == ':' {
-			return creds[:i], creds[i+1:]
-		}
-	}
-	return creds, ""
+// parseCredentials splits an OPNsense "key:secret" credential pair.
+func parseCredentials(creds string) (key, secret string) {
+	key, secret, _ = strings.Cut(creds, ":")
+	return key, secret
 }
