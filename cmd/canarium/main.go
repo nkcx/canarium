@@ -202,6 +202,16 @@ func runDaemon(configPath string) error {
 
 	store := facts.NewStore()
 	evaluator := conditions.NewEvaluator(store)
+
+	// Restore dwell progress so a restart partway through a "for: 5m"
+	// condition does not silently start the five minutes again.
+	if err := evaluator.SetDwellStore(db); err != nil {
+		logger.Error("restoring dwell state; timers will start from zero", "error", err)
+	}
+	evaluator.SetPersistErrorHandler(func(key string, err error) {
+		logger.Error("persisting dwell state", "condition", key, "error", err)
+	})
+
 	executor := engine.NewExecutor(cfg, store, evaluator, db, logger)
 
 	registerTransports(executor, cfg, logger)

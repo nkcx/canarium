@@ -13,6 +13,19 @@ import (
 	"github.com/nkcx/canarium/internal/state"
 )
 
+const (
+	// probeInterval is how often client reachability is sampled.
+	probeInterval = 30 * time.Second
+
+	// policyInterval is how often plan triggers are evaluated.
+	policyInterval = 5 * time.Second
+
+	// qualityRefreshInterval is how often fact freshness is recomputed. It
+	// is shorter than the shortest realistic source poll interval so a fact
+	// is marked stale promptly after its source stops reporting.
+	qualityRefreshInterval = 5 * time.Second
+)
+
 type Executor struct {
 	cfg        *config.Config
 	store      *facts.Store
@@ -151,6 +164,7 @@ func (e *Executor) Start() error {
 
 	go e.probeLoop()
 	go e.policyLoop()
+	go e.qualityLoop()
 
 	return nil
 }
@@ -189,7 +203,7 @@ func (e *Executor) restoreState() error {
 }
 
 func (e *Executor) probeLoop() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(probeInterval)
 	defer ticker.Stop()
 
 	e.probeAllClients()
@@ -247,8 +261,30 @@ func (e *Executor) probeAllClients() {
 	}
 }
 
+// qualityLoop keeps fact freshness current independently of operating mode.
+//
+// Quality refresh used to happen only inside evaluatePolicies, which returns
+// immediately when disarmed — so a disarmed daemon displayed every fact as
+// "good" forever, however long its source had been dead. Freshness is an
+// observation about the world, not a policy decision, so it runs always.
+func (e *Executor) qualityLoop() {
+	ticker := time.NewTicker(qualityRefreshInterval)
+	defer ticker.Stop()
+
+	e.store.RefreshQuality(time.Now())
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			e.store.RefreshQuality(time.Now())
+		}
+	}
+}
+
 func (e *Executor) policyLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(policyInterval)
 	defer ticker.Stop()
 
 	for {
@@ -267,7 +303,6 @@ func (e *Executor) evaluatePolicies() {
 	}
 
 	now := time.Now()
-	e.store.RefreshQuality(now)
 
 	for i := range e.cfg.Plans {
 		plan := &e.cfg.Plans[i]

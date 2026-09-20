@@ -2,10 +2,12 @@ package conditions
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/expr-lang/expr/vm"
 	"github.com/nkcx/canarium/internal/config"
 	"github.com/nkcx/canarium/internal/facts"
 )
@@ -14,21 +16,34 @@ type Evaluator struct {
 	store      *facts.Store
 	dwellState map[string]*DwellTracker
 	mu         sync.RWMutex
+
+	// programs caches compiled template expressions. Compilation dominates
+	// evaluation cost and templates are re-evaluated on every policy tick.
+	programMu sync.RWMutex
+	programs  map[string]*vm.Program
+
+	// dwellStore persists dwell progress across restarts. Nil means
+	// in-memory only, which is the behaviour under test and in simulation.
+	dwellStore DwellStore
+
+	// onPersistError is called when a dwell write fails. Persistence is
+	// best-effort: losing it costs accumulated dwell credit on the next
+	// restart, which is not worth failing an evaluation over.
+	onPersistError func(key string, err error)
 }
 
-type DwellTracker struct {
-	ConditionHash string
-	Required      time.Duration
-	FirstTrue     time.Time
-	LastTrue      time.Time
-	Satisfied     bool
-	MonoStart     int64 // monotonic nanoseconds
+// SetPersistErrorHandler registers a callback for dwell persistence failures.
+func (e *Evaluator) SetPersistErrorHandler(fn func(key string, err error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onPersistError = fn
 }
 
 func NewEvaluator(store *facts.Store) *Evaluator {
 	return &Evaluator{
 		store:      store,
 		dwellState: make(map[string]*DwellTracker),
+		programs:   make(map[string]*vm.Program),
 	}
 }
 
@@ -73,7 +88,7 @@ func (e *Evaluator) evaluateInner(cond *config.ConditionConfig, now time.Time) f
 
 func (e *Evaluator) evaluateNumeric(cond *config.ConditionConfig) facts.Trilean {
 	val, quality, _ := e.store.Get(cond.Fact)
-	if quality == facts.QualityUnknown || val == nil {
+	if !usable(quality, val) {
 		return facts.Unavailable
 	}
 
@@ -107,21 +122,29 @@ func (e *Evaluator) evaluateNumeric(cond *config.ConditionConfig) facts.Trilean 
 
 func (e *Evaluator) evaluateState(cond *config.ConditionConfig) facts.Trilean {
 	val, quality, _ := e.store.Get(cond.Fact)
-	if quality == facts.QualityUnknown || val == nil {
+	if !usable(quality, val) {
 		return facts.Unavailable
 	}
 
 	if cond.Contains != "" {
 		switch v := val.(type) {
 		case []string:
-			for _, s := range v {
-				if s == cond.Contains {
+			return facts.BoolToTrilean(slices.Contains(v, cond.Contains))
+		case []any:
+			// Facts loaded from JSON (simulation timelines) or from generic
+			// YAML decode to []any rather than []string.
+			for _, item := range v {
+				if s, ok := item.(string); ok && s == cond.Contains {
 					return facts.True
 				}
 			}
 			return facts.False
 		case string:
-			return facts.BoolToTrilean(v == cond.Contains)
+			// Substring, not equality. The expression-language contains()
+			// helper has always meant substring for strings, and a condition
+			// written `contains: OB` against a status string of "OB LB" must
+			// match — which is precisely the case a UPS produces.
+			return facts.BoolToTrilean(strings.Contains(v, cond.Contains))
 		default:
 			return facts.Unavailable
 		}
@@ -179,110 +202,28 @@ func (e *Evaluator) evaluateNot(cond *config.ConditionConfig, now time.Time) fac
 }
 
 func (e *Evaluator) evaluateTemplate(cond *config.ConditionConfig) facts.Trilean {
-	expr := cond.Value
-	if expr == "" {
+	expression := cond.Value
+	if expression == "" {
 		return facts.Unavailable
 	}
 
-	result, err := e.evaluateExpr(expr)
+	result, sawUnavailable, err := e.evaluateExpr(expression)
 	if err != nil {
+		// A template that cannot be evaluated tells us nothing about the
+		// world; it must not read as a definite false.
 		return facts.Unavailable
 	}
 
-	switch v := result.(type) {
-	case bool:
-		return facts.BoolToTrilean(v)
-	case nil:
-		return facts.Unavailable
-	default:
+	// An expression that consulted an unknown or stale fact produces an
+	// answer we cannot trust, even if the language gave us a clean boolean.
+	if sawUnavailable {
 		return facts.Unavailable
 	}
-}
 
-func (e *Evaluator) applyDwell(cond *config.ConditionConfig, current facts.Trilean, required time.Duration, now time.Time) facts.Trilean {
-	key := conditionKey(cond)
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	tracker, ok := e.dwellState[key]
-	if !ok {
-		tracker = &DwellTracker{
-			Required: required,
-		}
-		e.dwellState[key] = tracker
+	if b, ok := result.(bool); ok {
+		return facts.BoolToTrilean(b)
 	}
-
-	if current == facts.True {
-		if tracker.FirstTrue.IsZero() {
-			tracker.FirstTrue = now
-			tracker.MonoStart = monoNow()
-		}
-		tracker.LastTrue = now
-
-		elapsed := time.Duration(monoNow()-tracker.MonoStart) * time.Nanosecond
-		if elapsed >= required {
-			tracker.Satisfied = true
-			return facts.True
-		}
-		return facts.False
-	}
-
-	tracker.FirstTrue = time.Time{}
-	tracker.MonoStart = 0
-	tracker.Satisfied = false
-
-	if current == facts.Unavailable {
-		return facts.Unavailable
-	}
-	return facts.False
-}
-
-func (e *Evaluator) ResetDwell(cond *config.ConditionConfig) {
-	key := conditionKey(cond)
-	e.mu.Lock()
-	delete(e.dwellState, key)
-	e.mu.Unlock()
-}
-
-func (e *Evaluator) GetDwellState() map[string]*DwellTracker {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	result := make(map[string]*DwellTracker, len(e.dwellState))
-	for k, v := range e.dwellState {
-		cp := *v
-		result[k] = &cp
-	}
-	return result
-}
-
-func conditionKey(cond *config.ConditionConfig) string {
-	var parts []string
-	if cond.Condition != "" {
-		parts = append(parts, cond.Condition)
-	}
-	if cond.Fact != "" {
-		parts = append(parts, cond.Fact)
-	}
-	if cond.Above != nil {
-		parts = append(parts, fmt.Sprintf("above:%v", *cond.Above))
-	}
-	if cond.Below != nil {
-		parts = append(parts, fmt.Sprintf("below:%v", *cond.Below))
-	}
-	if cond.Is != "" {
-		parts = append(parts, fmt.Sprintf("is:%s", cond.Is))
-	}
-	if cond.Contains != "" {
-		parts = append(parts, fmt.Sprintf("contains:%s", cond.Contains))
-	}
-	if cond.Value != "" {
-		parts = append(parts, fmt.Sprintf("tmpl:%s", cond.Value))
-	}
-	if cond.For != "" {
-		parts = append(parts, fmt.Sprintf("for:%s", cond.For))
-	}
-	return strings.Join(parts, "|")
+	return facts.Unavailable
 }
 
 func inferConditionType(cond *config.ConditionConfig) string {
@@ -299,6 +240,23 @@ func inferConditionType(cond *config.ConditionConfig) string {
 		return "state"
 	}
 	return "true"
+}
+
+// usable reports whether a fact may be used to decide a condition.
+//
+// Only QualityGood counts. A stale fact still holds its last observed value,
+// and an earlier version accepted it — so if the UPS source died moments
+// after reporting "on battery, 25% charge", that reading stayed true forever
+// and would fire a shutdown from data that no longer described reality.
+//
+// SPEC §4.4: "Unknown or stale facts produce `unavailable` in condition
+// evaluation, which never satisfies triggers, gates, or aborts." Under
+// three-valued logic Unavailable never satisfies anything, so treating
+// staleness this way is fail-safe everywhere it appears: a stale trigger
+// does not fire, a stale wake gate does not wake, and a stale stage
+// condition waits rather than acting.
+func usable(quality facts.Quality, val any) bool {
+	return quality == facts.QualityGood && val != nil
 }
 
 func toFloat64(v any) (float64, bool) {
