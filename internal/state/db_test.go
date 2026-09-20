@@ -196,9 +196,9 @@ func TestIntentRoundtrip(t *testing.T) {
 	db := testDB(t)
 
 	seq := &Sequence{
-		ID:       "seq_1",
-		PlanName: "outage",
-		State:    "shutting_down",
+		ID:        "seq_1",
+		PlanName:  "outage",
+		State:     "shutting_down",
 		StartedAt: time.Now(),
 	}
 	db.SaveSequence(seq)
@@ -289,10 +289,10 @@ func TestStageRecords(t *testing.T) {
 
 	now := time.Now()
 	rec := &StageRecord{
-		SequenceID: "seq_1",
-		StageIndex: 0,
-		StageName:  "compute",
-		StartedAt:  now,
+		SequenceID:  "seq_1",
+		StageIndex:  0,
+		StageName:   "compute",
+		StartedAt:   now,
 		CompletedAt: &now,
 	}
 	db.SaveStageRecord(rec)

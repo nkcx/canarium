@@ -76,8 +76,8 @@ func TestRunSimulation(t *testing.T) {
 				Shutdown: config.ShutdownConfig{
 					Stages: []config.StageConfig{
 						{
-							Name: "s1",
-							When: config.ConditionConfig{Value: "true"},
+							Name:        "s1",
+							When:        config.ConditionConfig{Value: "true"},
 							WaitTimeout: "1h",
 							WaitPolicy:  "skip",
 						},

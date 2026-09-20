@@ -79,12 +79,12 @@ func ParseFactType(s string) FactType {
 }
 
 type FactDeclaration struct {
-	Name        string   `yaml:"name"`
-	Type        string   `yaml:"type"`
+	Name        string    `yaml:"name"`
+	Type        string    `yaml:"type"`
 	Range       []float64 `yaml:"range,omitempty"`
-	Values      []string `yaml:"values,omitempty"`
-	Description string   `yaml:"description,omitempty"`
-	Unit        string   `yaml:"unit,omitempty"`
+	Values      []string  `yaml:"values,omitempty"`
+	Description string    `yaml:"description,omitempty"`
+	Unit        string    `yaml:"unit,omitempty"`
 }
 
 type Fact struct {

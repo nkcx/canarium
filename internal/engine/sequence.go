@@ -52,9 +52,9 @@ type Sequence struct {
 }
 
 type ResolvedAddr struct {
-	IP        string
-	MAC       string
-	Hostname  string
+	IP         string
+	MAC        string
+	Hostname   string
 	ResolvedAt time.Time
 }
 
@@ -83,17 +83,17 @@ func (s IntentStatus) String() string {
 }
 
 type StageRecord struct {
-	SequenceID string
-	StageIndex int
-	StageName  string
-	StartedAt  time.Time
+	SequenceID  string
+	StageIndex  int
+	StageName   string
+	StartedAt   time.Time
 	CompletedAt *time.Time
-	Clients    map[string]ClientStageResult
+	Clients     map[string]ClientStageResult
 }
 
 type ClientStageResult struct {
-	State      ClientState
-	StartedAt  time.Time
+	State       ClientState
+	StartedAt   time.Time
 	CompletedAt *time.Time
-	Error      string
+	Error       string
 }

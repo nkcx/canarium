@@ -136,16 +136,16 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	type clientInfo struct {
-		Name        string            `json:"name"`
-		Description string            `json:"description"`
-		Transport   string            `json:"transport"`
-		Address     string            `json:"address"`
-		Tags        []string          `json:"tags"`
-		Feeds       []string          `json:"feeds"`
-		FeedPolicy  string            `json:"feed_policy"`
-		WakePolicy  string            `json:"wake_policy"`
-		DependsOn   []string          `json:"depends_on"`
-		State       string            `json:"state"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Transport   string   `json:"transport"`
+		Address     string   `json:"address"`
+		Tags        []string `json:"tags"`
+		Feeds       []string `json:"feeds"`
+		FeedPolicy  string   `json:"feed_policy"`
+		WakePolicy  string   `json:"wake_policy"`
+		DependsOn   []string `json:"depends_on"`
+		State       string   `json:"state"`
 	}
 
 	var clients []clientInfo

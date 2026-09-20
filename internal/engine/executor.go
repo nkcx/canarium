@@ -32,9 +32,9 @@ type Executor struct {
 }
 
 type ActiveSequence struct {
-	Sequence  *state.Sequence
-	Plan      *config.PlanConfig
-	Aborted   bool
+	Sequence *state.Sequence
+	Plan     *config.PlanConfig
+	Aborted  bool
 }
 
 type Event struct {

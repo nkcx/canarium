@@ -9,24 +9,24 @@ import (
 	"syscall"
 	"time"
 
+	canarium "github.com/nkcx/canarium"
 	"github.com/nkcx/canarium/internal/api"
 	"github.com/nkcx/canarium/internal/conditions"
 	"github.com/nkcx/canarium/internal/config"
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
 	"github.com/nkcx/canarium/internal/notify"
-	"github.com/nkcx/canarium/internal/state"
 	"github.com/nkcx/canarium/internal/simulate"
+	"github.com/nkcx/canarium/internal/state"
+	execmod "github.com/nkcx/canarium/modules/exec"
 	nutmod "github.com/nkcx/canarium/modules/nut"
-	"github.com/nkcx/canarium/modules/proxmox"
 	"github.com/nkcx/canarium/modules/opnsense"
+	"github.com/nkcx/canarium/modules/proxmox"
+	restmod "github.com/nkcx/canarium/modules/rest"
 	snmpmod "github.com/nkcx/canarium/modules/snmp"
 	"github.com/nkcx/canarium/modules/ssh"
 	"github.com/nkcx/canarium/modules/truenas"
 	"github.com/nkcx/canarium/modules/wol"
-	execmod "github.com/nkcx/canarium/modules/exec"
-	restmod "github.com/nkcx/canarium/modules/rest"
-	canarium "github.com/nkcx/canarium"
 	"github.com/spf13/cobra"
 )
 
@@ -267,9 +267,9 @@ func registerSources(store *facts.Store, cfg *config.Config, logger *slog.Logger
 				for _, inst := range cfgData {
 					if m, ok := inst.(map[string]any); ok {
 						ic := nutmod.InstanceConfig{
-							Name: getStr(m, "name"),
-							Host: getStr(m, "host"),
-							UPS:  getStr(m, "ups"),
+							Name:         getStr(m, "name"),
+							Host:         getStr(m, "host"),
+							UPS:          getStr(m, "ups"),
 							PollInterval: getStr(m, "poll_interval"),
 						}
 						if p, ok := m["port"].(int); ok {

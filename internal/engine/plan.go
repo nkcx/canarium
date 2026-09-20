@@ -16,12 +16,12 @@ type ShutdownPlan struct {
 }
 
 type Stage struct {
-	Name           string
-	When           Condition
-	Clients        []string // resolved client names (tags expanded)
-	Budget         time.Duration
-	WaitTimeout    time.Duration
-	WaitPolicy     WaitPolicy
+	Name            string
+	When            Condition
+	Clients         []string // resolved client names (tags expanded)
+	Budget          time.Duration
+	WaitTimeout     time.Duration
+	WaitPolicy      WaitPolicy
 	PointOfNoReturn bool
 }
 

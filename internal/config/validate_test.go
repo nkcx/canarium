@@ -49,7 +49,7 @@ func TestValidateSameStageDepends(t *testing.T) {
 		},
 		Plans: []PlanConfig{
 			{
-				Name: "test",
+				Name:    "test",
 				Trigger: ConditionConfig{Value: "true"},
 				Shutdown: ShutdownConfig{
 					Stages: []StageConfig{

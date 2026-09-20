@@ -14,7 +14,7 @@ import (
 )
 
 type Timeline struct {
-	Duration time.Duration `json:"duration"`
+	Duration time.Duration   `json:"duration"`
 	Events   []TimelineEvent `json:"events"`
 }
 
@@ -25,9 +25,9 @@ type TimelineEvent struct {
 }
 
 type SimulationResult struct {
-	Triggers  []TriggerEvent `json:"triggers"`
-	Aborts    []AbortEvent   `json:"aborts"`
-	Stages    []StageEvent   `json:"stages"`
+	Triggers  []TriggerEvent  `json:"triggers"`
+	Aborts    []AbortEvent    `json:"aborts"`
+	Stages    []StageEvent    `json:"stages"`
 	WakeGates []WakeGateEvent `json:"wake_gates"`
 }
 

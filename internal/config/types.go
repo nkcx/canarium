@@ -10,12 +10,12 @@ type Config struct {
 }
 
 type CanariumConfig struct {
-	Mode           string `yaml:"mode"`
-	Host           string `yaml:"host"`
-	DataDir        string `yaml:"data_dir"`
-	JournalRetain  string `yaml:"journal_retain"`
-	ConfigReadonly bool   `yaml:"config_readonly"`
-	Auth           AuthConfig `yaml:"auth"`
+	Mode           string             `yaml:"mode"`
+	Host           string             `yaml:"host"`
+	DataDir        string             `yaml:"data_dir"`
+	JournalRetain  string             `yaml:"journal_retain"`
+	ConfigReadonly bool               `yaml:"config_readonly"`
+	Auth           AuthConfig         `yaml:"auth"`
 	Notifications  NotificationConfig `yaml:"notifications"`
 }
 
@@ -41,25 +41,25 @@ type SourceConfig struct {
 }
 
 type ClientConfig struct {
-	Name            string         `yaml:"name"`
-	Description     string         `yaml:"description,omitempty"`
-	Transport       string         `yaml:"transport"`
-	Address         string         `yaml:"address,omitempty"`
-	MAC             string         `yaml:"mac,omitempty"`
-	Credentials     string         `yaml:"credentials,omitempty"`
-	Tags            []string       `yaml:"tags,omitempty"`
-	Feeds           []string       `yaml:"feeds,omitempty"`
-	FeedPolicy      string         `yaml:"feed_policy,omitempty"`
-	ShutdownBudget  string         `yaml:"shutdown_budget,omitempty"`
-	WakePolicy      string         `yaml:"wake_policy,omitempty"`
-	GuardPeriod     string         `yaml:"guard_period,omitempty"`
-	CommsLossAssumes string        `yaml:"comms_loss_assumes,omitempty"`
-	DependsOn       []string       `yaml:"depends_on,omitempty"`
-	After           []string       `yaml:"after,omitempty"`
-	Before          []string       `yaml:"before,omitempty"`
-	Probe           *ProbeConfig   `yaml:"probe,omitempty"`
-	Wake            *WakeConfig    `yaml:"wake,omitempty"`
-	Config          map[string]any `yaml:"config,omitempty"`
+	Name             string         `yaml:"name"`
+	Description      string         `yaml:"description,omitempty"`
+	Transport        string         `yaml:"transport"`
+	Address          string         `yaml:"address,omitempty"`
+	MAC              string         `yaml:"mac,omitempty"`
+	Credentials      string         `yaml:"credentials,omitempty"`
+	Tags             []string       `yaml:"tags,omitempty"`
+	Feeds            []string       `yaml:"feeds,omitempty"`
+	FeedPolicy       string         `yaml:"feed_policy,omitempty"`
+	ShutdownBudget   string         `yaml:"shutdown_budget,omitempty"`
+	WakePolicy       string         `yaml:"wake_policy,omitempty"`
+	GuardPeriod      string         `yaml:"guard_period,omitempty"`
+	CommsLossAssumes string         `yaml:"comms_loss_assumes,omitempty"`
+	DependsOn        []string       `yaml:"depends_on,omitempty"`
+	After            []string       `yaml:"after,omitempty"`
+	Before           []string       `yaml:"before,omitempty"`
+	Probe            *ProbeConfig   `yaml:"probe,omitempty"`
+	Wake             *WakeConfig    `yaml:"wake,omitempty"`
+	Config           map[string]any `yaml:"config,omitempty"`
 }
 
 type ProbeConfig struct {
@@ -69,18 +69,18 @@ type ProbeConfig struct {
 }
 
 type WakeConfig struct {
-	Transport string `yaml:"transport"`
-	MAC       string `yaml:"mac,omitempty"`
-	Broadcast string `yaml:"broadcast,omitempty"`
+	Transport string         `yaml:"transport"`
+	MAC       string         `yaml:"mac,omitempty"`
+	Broadcast string         `yaml:"broadcast,omitempty"`
 	Config    map[string]any `yaml:"config,omitempty"`
 }
 
 type PlanConfig struct {
-	Name         string           `yaml:"name"`
-	Trigger      ConditionConfig  `yaml:"trigger"`
-	Abort        *ConditionConfig `yaml:"abort,omitempty"`
-	Shutdown     ShutdownConfig   `yaml:"shutdown"`
-	Wake         WakeConfig_      `yaml:"wake"`
+	Name     string           `yaml:"name"`
+	Trigger  ConditionConfig  `yaml:"trigger"`
+	Abort    *ConditionConfig `yaml:"abort,omitempty"`
+	Shutdown ShutdownConfig   `yaml:"shutdown"`
+	Wake     WakeConfig_      `yaml:"wake"`
 }
 
 type ShutdownConfig struct {
