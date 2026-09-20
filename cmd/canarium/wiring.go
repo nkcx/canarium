@@ -231,6 +231,19 @@ func (m *SourceManager) Stop() {
 	m.wg.Wait()
 }
 
+// buildSources constructs every configured source without starting it.
+func buildSources(cfg *config.Config, store *facts.Store, logger *slog.Logger) ([]engine.Source, error) {
+	sources := make([]engine.Source, 0, len(cfg.Sources))
+	for _, src := range cfg.Sources {
+		source, err := buildSource(src, store, logger)
+		if err != nil {
+			return nil, fmt.Errorf("source %q: %w", src.Name, err)
+		}
+		sources = append(sources, source)
+	}
+	return sources, nil
+}
+
 // buildRegistry describes what this daemon supports, for validation.
 func buildRegistry(cfg *config.Config, store *facts.Store, logger *slog.Logger) *config.Registry {
 	declared := store.AllDeclarations()

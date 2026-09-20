@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	canarium "github.com/nkcx/canarium"
 	"github.com/nkcx/canarium/internal/api"
 	"github.com/nkcx/canarium/internal/conditions"
 	"github.com/nkcx/canarium/internal/config"
+	"github.com/nkcx/canarium/internal/doctor"
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
 	"github.com/nkcx/canarium/internal/notify"
@@ -173,28 +175,78 @@ func validateCmd(configPath *string) *cobra.Command {
 }
 
 func doctorCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var timeout time.Duration
+	var settle time.Duration
+
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Run live preflight checks (connectivity, credentials, capabilities)",
+		Long: "Contact everything the config names and report whether it is usable.\n\n" +
+			"Where `validate` checks a config against itself, doctor checks it against\n" +
+			"reality: that sources authenticate and produce facts, that client\n" +
+			"addresses resolve and answer, that credentials are present, and that the\n" +
+			"state directory is writable.\n\n" +
+			"Run this after changing anything, so a broken credential surfaces on a\n" +
+			"Tuesday afternoon rather than during an outage.",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			logger := newLogger(os.Stderr, slog.LevelWarn)
+
+			cfg, result, err := loadAndValidate(*configPath, logger, config.LoadOptions{})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading config: %s\n", err)
-				return err
+				return fmt.Errorf("loading config: %w", err)
 			}
-
-			result := config.Validate(cfg)
 			if result.HasErrors() {
-				for _, e := range result.Errors {
-					fmt.Fprintf(os.Stderr, "ERROR: %s\n", e)
-				}
-				return fmt.Errorf("config validation failed, fix errors before running doctor")
+				reportValidation(result, false)
+				return fmt.Errorf("config validation failed; fix these before running doctor")
 			}
 
-			fmt.Println("Config validation passed. Live checks not yet implemented.")
+			store := facts.NewStore()
+			sources, err := buildSources(cfg, store, logger)
+			if err != nil {
+				return fmt.Errorf("building sources: %w", err)
+			}
+
+			d := doctor.New(cfg, buildTransports(cfg, logger), sources, store, doctor.Options{
+				Timeout:      timeout,
+				SourceSettle: settle,
+			})
+
+			fmt.Printf("Running preflight checks (this contacts every configured host)...\n\n")
+			report := d.Run(cmd.Context())
+
+			printDoctorReport(report)
+
+			if report.HasFailures() {
+				return fmt.Errorf("preflight checks failed")
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().DurationVar(&timeout, "timeout", doctor.DefaultOptions().Timeout,
+		"per-check timeout")
+	cmd.Flags().DurationVar(&settle, "source-settle", doctor.DefaultOptions().SourceSettle,
+		"how long to wait for a source to produce its first facts")
+
+	return cmd
+}
+
+// printDoctorReport renders a preflight report as an aligned table.
+func printDoctorReport(report *doctor.Report) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "STATUS\tSUBJECT\tCHECK\tDETAIL")
+
+	for _, c := range report.Checks {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.Status, c.Subject, c.Name, c.Detail)
+	}
+	w.Flush()
+
+	counts := report.Counts()
+	fmt.Printf("\n%d ok, %d warning(s), %d failure(s), %d skipped\n",
+		counts[doctor.StatusOK], counts[doctor.StatusWarn],
+		counts[doctor.StatusFail], counts[doctor.StatusSkip])
 }
 
 func simulateCmd(configPath *string) *cobra.Command {
