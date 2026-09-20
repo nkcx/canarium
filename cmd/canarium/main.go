@@ -278,8 +278,22 @@ func warnIfNoAdminPassword(db *state.DB, logger *slog.Logger) {
 }
 
 func registerTransports(executor *engine.Executor, cfg *config.Config, logger *slog.Logger) {
-	executor.RegisterTransport("ssh", ssh.New(ssh.Config{}))
-	executor.RegisterTransport("wol", wol.New(wol.Config{}, logger))
+	executor.RegisterTransport("ssh", ssh.New(ssh.Config{
+		User:           cfg.Transports.SSH.User,
+		Port:           cfg.Transports.SSH.Port,
+		Command:        cfg.Transports.SSH.Command,
+		KeyPath:        cfg.Transports.SSH.KeyPath,
+		KeyPassphrase:  cfg.Transports.SSH.KeyPassphrase,
+		KnownHosts:     cfg.Transports.SSH.KnownHosts,
+		HostKeyPolicy:  cfg.Transports.SSH.HostKeyPolicy,
+		ConnectTimeout: cfg.Transports.SSH.ConnectTimeout,
+		CommandTimeout: cfg.Transports.SSH.CommandTimeout,
+	}, logger))
+	executor.RegisterTransport("wol", wol.New(wol.Config{
+		RepeatCount: cfg.Transports.WOL.RepeatCount,
+		RepeatDelay: cfg.Transports.WOL.RepeatDelay,
+		Port:        cfg.Transports.WOL.Port,
+	}, logger))
 	executor.RegisterTransport("exec", execmod.New())
 	executor.RegisterTransport("rest", restmod.New())
 	executor.RegisterTransport("proxmox", proxmox.New(logger))

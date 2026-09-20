@@ -10,31 +10,66 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/engine"
+	"github.com/nkcx/canarium/internal/netutil"
 )
 
 type Transport struct {
 	repeatCount int
 	repeatDelay time.Duration
+	port        int
 	logger      *slog.Logger
 }
 
+// Config holds the wol transport's settings.
+//
+// RepeatDelay is a string rather than a time.Duration because yaml.v3 decodes
+// a duration only from an integer nanosecond count, so "500ms" in a config
+// file would have failed to parse. The field was unreachable in practice
+// anyway: New was always called with a zero Config.
 type Config struct {
-	RepeatCount int           `yaml:"repeat_count"`
-	RepeatDelay time.Duration `yaml:"repeat_delay"`
+	RepeatCount int    `yaml:"repeat_count"`
+	RepeatDelay string `yaml:"repeat_delay"`
+	Port        int    `yaml:"port"`
 }
+
+const (
+	defaultRepeatCount = 3
+	defaultRepeatDelay = 500 * time.Millisecond
+
+	// defaultWOLPort is the conventional destination for magic packets.
+	// Port 9 is discard; some hardware listens on 7 instead.
+	defaultWOLPort = 9
+
+	// globalBroadcast is the last-resort destination. Routers do not forward
+	// it, so it only reaches the local segment.
+	globalBroadcast = "255.255.255.255"
+)
 
 func New(cfg Config, logger *slog.Logger) *Transport {
 	count := cfg.RepeatCount
-	if count == 0 {
-		count = 3
+	if count <= 0 {
+		count = defaultRepeatCount
 	}
-	delay := cfg.RepeatDelay
-	if delay == 0 {
-		delay = 500 * time.Millisecond
+
+	delay := defaultRepeatDelay
+	if cfg.RepeatDelay != "" {
+		if d, err := time.ParseDuration(cfg.RepeatDelay); err == nil {
+			delay = d
+		} else {
+			logger.Error("invalid wol repeat_delay; using the default",
+				"value", cfg.RepeatDelay, "default", defaultRepeatDelay, "error", err)
+		}
 	}
+
+	port := cfg.Port
+	if port <= 0 {
+		port = defaultWOLPort
+	}
+
 	return &Transport{
 		repeatCount: count,
 		repeatDelay: delay,
+		port:        port,
 		logger:      logger,
 	}
 }
@@ -68,7 +103,7 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 		broadcast = inferBroadcast(client.Address, t.logger)
 	}
 	if broadcast == "" {
-		broadcast = "255.255.255.255"
+		broadcast = globalBroadcast
 	}
 
 	packet, err := buildMagicPacket(mac)
@@ -77,7 +112,7 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 	}
 
 	for i := 0; i < t.repeatCount; i++ {
-		if err := sendPacket(broadcast, packet); err != nil {
+		if err := sendPacket(broadcast, t.port, packet); err != nil {
 			return &engine.ActionResult{Success: false, Message: err.Error()}, err
 		}
 		if i < t.repeatCount-1 {
@@ -91,7 +126,8 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 
 	return &engine.ActionResult{
 		Success: true,
-		Message: fmt.Sprintf("sent %d magic packets to %s via %s", t.repeatCount, mac, broadcast),
+		Message: fmt.Sprintf("sent %d magic packets to %s via %s:%d",
+			t.repeatCount, mac, broadcast, t.port),
 	}, nil
 }
 
@@ -154,17 +190,47 @@ func inferBroadcast(clientIP string, logger *slog.Logger) string {
 }
 
 // broadcastFromCIDR computes the broadcast address for an IP within a subnet.
+//
+// The mask is normalised to four bytes first. net.IPNet.Mask for an IPv4
+// address may legitimately be either 4 or 16 bytes depending on how the
+// address was obtained, and indexing the first four bytes of a 16-byte
+// IPv4-in-IPv6 mask reads the all-zero prefix — yielding 255.255.255.255 and
+// sending the magic packet to the global broadcast address instead of the
+// client's subnet, which routers drop.
 func broadcastFromCIDR(ip net.IP, mask net.IPMask) string {
 	ip = ip.To4()
 	if ip == nil {
-		return "255.255.255.255"
+		return globalBroadcast
 	}
 
-	bcast := make(net.IP, 4)
-	for i := 0; i < 4; i++ {
-		bcast[i] = ip[i] | ^mask[i]
+	mask4 := normalizeMask(mask)
+	if mask4 == nil {
+		return globalBroadcast
+	}
+
+	bcast := make(net.IP, net.IPv4len)
+	for i := 0; i < net.IPv4len; i++ {
+		bcast[i] = ip[i] | ^mask4[i]
 	}
 	return bcast.String()
+}
+
+// normalizeMask reduces an IPv4 mask to its 4-byte form, returning nil if it
+// is not an IPv4 mask.
+func normalizeMask(mask net.IPMask) net.IPMask {
+	switch len(mask) {
+	case net.IPv4len:
+		return mask
+	case net.IPv6len:
+		// An IPv4-mapped mask is 80 zero bits, 16 one bits, then the mask.
+		ones, bits := mask.Size()
+		if bits != 128 || ones < 96 {
+			return nil
+		}
+		return net.CIDRMask(ones-96, 32)
+	default:
+		return nil
+	}
 }
 
 func buildMagicPacket(macAddr string) ([]byte, error) {
@@ -192,8 +258,8 @@ func buildMagicPacket(macAddr string) ([]byte, error) {
 	return packet, nil
 }
 
-func sendPacket(broadcast string, packet []byte) error {
-	addr, err := net.ResolveUDPAddr("udp4", broadcast+":9")
+func sendPacket(broadcast string, port int, packet []byte) error {
+	addr, err := net.ResolveUDPAddr("udp4", netutil.HostPort(broadcast, port))
 	if err != nil {
 		return fmt.Errorf("resolving broadcast address: %w", err)
 	}
@@ -204,7 +270,11 @@ func sendPacket(broadcast string, packet []byte) error {
 	}
 	defer conn.Close()
 
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err = conn.Write(packet)
-	return err
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("setting write deadline: %w", err)
+	}
+	if _, err := conn.Write(packet); err != nil {
+		return fmt.Errorf("sending magic packet: %w", err)
+	}
+	return nil
 }

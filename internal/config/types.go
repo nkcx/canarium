@@ -3,10 +3,64 @@ package config
 import "time"
 
 type Config struct {
-	Canarium CanariumConfig `yaml:"canarium"`
-	Sources  []SourceConfig `yaml:"sources"`
-	Clients  []ClientConfig `yaml:"clients"`
-	Plans    []PlanConfig   `yaml:"plans"`
+	Canarium   CanariumConfig   `yaml:"canarium"`
+	Transports TransportsConfig `yaml:"transports,omitempty"`
+	Sources    []SourceConfig   `yaml:"sources"`
+	Clients    []ClientConfig   `yaml:"clients"`
+	Plans      []PlanConfig     `yaml:"plans"`
+}
+
+// TransportsConfig holds per-transport defaults, which individual clients
+// override through their own transport_config block.
+//
+// These structs existed in the transport packages from the beginning but were
+// always constructed empty — ssh.New(ssh.Config{}) — so none of their
+// settings could be reached from a config file.
+type TransportsConfig struct {
+	SSH SSHTransportConfig `yaml:"ssh,omitempty"`
+	WOL WOLTransportConfig `yaml:"wol,omitempty"`
+}
+
+// SSHTransportConfig configures the ssh transport.
+type SSHTransportConfig struct {
+	// User to authenticate as. Defaults to root.
+	User string `yaml:"user,omitempty"`
+
+	// Port to connect to. Defaults to 22. Distinct from probe.port.
+	Port int `yaml:"port,omitempty"`
+
+	// Command run to shut a host down. Defaults to "shutdown -h now".
+	Command string `yaml:"command,omitempty"`
+
+	// KeyPath is the private key used for authentication. Required unless
+	// every client sets its own.
+	KeyPath       string `yaml:"key_path,omitempty"`
+	KeyPassphrase string `yaml:"key_passphrase,omitempty"`
+
+	// KnownHosts is the file host keys are verified against. Defaults to
+	// <data_dir>/known_hosts.
+	KnownHosts string `yaml:"known_hosts,omitempty"`
+
+	// HostKeyPolicy is one of "strict", "accept-new" or "insecure".
+	// Defaults to accept-new: learn a key on first contact, then pin it.
+	HostKeyPolicy string `yaml:"host_key_policy,omitempty"`
+
+	ConnectTimeout string `yaml:"connect_timeout,omitempty"`
+	CommandTimeout string `yaml:"command_timeout,omitempty"`
+}
+
+// WOLTransportConfig configures Wake-on-LAN packet emission.
+type WOLTransportConfig struct {
+	// RepeatCount is how many magic packets are sent per wake. Repeats
+	// cover UDP loss on a network that is itself coming back up.
+	RepeatCount int `yaml:"repeat_count,omitempty"`
+
+	// RepeatDelay is the gap between repeats.
+	RepeatDelay string `yaml:"repeat_delay,omitempty"`
+
+	// Port is the UDP destination port. 9 (discard) is conventional; some
+	// hardware listens on 7.
+	Port int `yaml:"port,omitempty"`
 }
 
 type CanariumConfig struct {

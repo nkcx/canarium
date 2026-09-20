@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -48,6 +49,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Canarium.JournalRetain == "" {
 		cfg.Canarium.JournalRetain = "30d"
+	}
+
+	if cfg.Transports.SSH.KnownHosts == "" {
+		// Keep learned host keys alongside the rest of the daemon's state,
+		// so they survive restarts and container recreation.
+		cfg.Transports.SSH.KnownHosts = filepath.Join(cfg.Canarium.DataDir, "known_hosts")
+	}
+	if cfg.Transports.SSH.HostKeyPolicy == "" {
+		cfg.Transports.SSH.HostKeyPolicy = "accept-new"
 	}
 
 	for i := range cfg.Clients {
