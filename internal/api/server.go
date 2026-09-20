@@ -32,8 +32,8 @@ const (
 	// sessionCookieName is the cookie carrying the session token.
 	sessionCookieName = "canarium_session"
 
-	// sessionKeyPrefix namespaces session rows in the kv table.
-	sessionKeyPrefix = "session:"
+	// sessionReapInterval is how often expired sessions are pruned.
+	sessionReapInterval = 1 * time.Hour
 )
 
 type Server struct {
@@ -48,6 +48,11 @@ type Server struct {
 
 	wsMu      sync.RWMutex
 	wsClients map[*wsClient]bool
+
+	// ctx is cancelled by Stop and bounds the server's background
+	// goroutines.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewServer(
@@ -58,6 +63,7 @@ func NewServer(
 	webFS embed.FS,
 	logger *slog.Logger,
 ) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:       cfg,
 		store:     store,
@@ -67,6 +73,8 @@ func NewServer(
 		webFS:     webFS,
 		mux:       http.NewServeMux(),
 		wsClients: make(map[*wsClient]bool),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 
 	s.routes()
@@ -84,6 +92,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/abort", s.requireAuth(s.handleAbort))
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleSetup)
 	s.mux.HandleFunc("GET /api/ws", s.requireAuth(s.handleWebSocket))
 
@@ -100,14 +109,65 @@ func (s *Server) Start(addr string) error {
 	s.server = &http.Server{
 		Addr:    addr,
 		Handler: s.mux,
+
+		// Bound how long a slow or malicious client can hold a connection.
+		// WriteTimeout is deliberately absent: the WebSocket endpoint holds
+		// its connection open indefinitely by design and sets its own
+		// per-message deadlines.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
+
+	go s.reapExpiredSessions()
 
 	s.logger.Info("API server starting", "addr", addr)
 	return s.server.ListenAndServe()
 }
 
+// Stop shuts the HTTP server down gracefully and stops background work.
+//
+// Calling Stop before Start is safe; an earlier version dereferenced a nil
+// http.Server in that case, so a failure during startup turned into a panic
+// during shutdown.
 func (s *Server) Stop(ctx context.Context) error {
+	s.cancel()
+
+	if s.server == nil {
+		return nil
+	}
 	return s.server.Shutdown(ctx)
+}
+
+// reapExpiredSessions periodically removes sessions past their expiry.
+//
+// Without this the table grows without bound: the previous kv-backed
+// implementation never deleted anything, so every login ever performed left a
+// row behind forever.
+func (s *Server) reapExpiredSessions() {
+	ticker := time.NewTicker(sessionReapInterval)
+	defer ticker.Stop()
+
+	prune := func() {
+		n, err := s.db.DeleteExpiredSessions()
+		if err != nil {
+			s.logger.Error("pruning expired sessions", "error", err)
+			return
+		}
+		if n > 0 {
+			s.logger.Debug("pruned expired sessions", "count", n)
+		}
+	}
+
+	prune()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -273,22 +333,68 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
+	http.SetCookie(w, s.sessionCookie(r, token, int(sessionTTL.Seconds())))
 
-	if err := s.db.SetKV(sessionKey(token), time.Now().Add(sessionTTL).Format(time.RFC3339)); err != nil {
+	if err := s.db.CreateSession(hashToken(token), sessionTTL); err != nil {
 		s.logger.Error("persisting session", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleLogout invalidates the caller's session and clears the cookie.
+//
+// It is intentionally not wrapped in requireAuth: logging out with an
+// already-invalid session should succeed quietly rather than return 401,
+// and there is nothing to protect.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+		if err := s.db.DeleteSession(hashToken(cookie.Value)); err != nil {
+			s.logger.Error("deleting session", "error", err)
+		}
+	}
+
+	// MaxAge < 0 instructs the browser to delete the cookie immediately.
+	http.SetCookie(w, s.sessionCookie(r, "", -1))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// sessionCookie builds the session cookie with the security attributes
+// appropriate to how the request arrived.
+//
+// Secure is set when the connection is TLS, or when a trusted reverse proxy
+// reports that the original request was — Canarium terminates no TLS itself
+// and is documented to run behind a proxy. It is deliberately not set
+// unconditionally: on a plain-HTTP deployment a Secure cookie is silently
+// discarded by the browser, which would make login appear to succeed and
+// then fail on every subsequent request.
+func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.requestIsSecure(r),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   maxAge,
+	}
+}
+
+func (s *Server) requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if !s.cfg.Canarium.Auth.TrustProxyHeaders {
+		return false
+	}
+	// Only consulted when the operator has opted in, because these headers
+	// are attacker-controlled when the daemon is reachable directly.
+	if proto := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on")
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -394,23 +500,12 @@ func (s *Server) authenticate(r *http.Request) bool {
 		return false
 	}
 
-	expiryStr, err := s.db.GetKV(sessionKey(cookie.Value))
+	valid, err := s.db.SessionIsValid(hashToken(cookie.Value))
 	if err != nil {
-		s.logger.Error("reading session", "error", err)
+		s.logger.Error("validating session", "error", err)
 		return false
 	}
-	if expiryStr == "" {
-		return false
-	}
-
-	expiry, err := time.Parse(time.RFC3339, expiryStr)
-	if err != nil {
-		s.logger.Warn("session has an unparseable expiry; treating as invalid",
-			"error", err)
-		return false
-	}
-
-	return time.Now().Before(expiry)
+	return valid
 }
 
 // bearerToken extracts a token from the Authorization header, accepting both
@@ -454,13 +549,6 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
-}
-
-// sessionKey is the kv-table key under which a session's expiry is stored.
-// The raw token is never persisted, only its digest, so a database leak does
-// not yield usable session cookies.
-func sessionKey(token string) string {
-	return sessionKeyPrefix + hashToken(token)
 }
 
 func hashToken(token string) string {

@@ -19,8 +19,14 @@ type CanariumConfig struct {
 	Notifications  NotificationConfig `yaml:"notifications"`
 }
 
+// AuthConfig controls how the API authenticates callers.
 type AuthConfig struct {
-	PasswordHash string `yaml:"password_hash,omitempty"`
+	// TrustProxyHeaders makes the server believe X-Forwarded-Proto and
+	// X-Forwarded-Ssl when deciding whether to mark the session cookie
+	// Secure. Enable this only when Canarium is reachable exclusively
+	// through a reverse proxy that sets them; if the daemon can be reached
+	// directly, a client can set these headers itself.
+	TrustProxyHeaders bool `yaml:"trust_proxy_headers,omitempty"`
 }
 
 type NotificationConfig struct {

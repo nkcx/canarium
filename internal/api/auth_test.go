@@ -62,25 +62,23 @@ func TestNewSessionTokenIsNotClockDerived(t *testing.T) {
 	}
 }
 
-// TestSessionKeyDoesNotContainRawToken verifies that what lands in the
-// database is a digest, not the cookie value itself.
-func TestSessionKeyDoesNotContainRawToken(t *testing.T) {
+// TestStoredSessionIsHashed verifies that what lands in the database is a
+// digest, not the cookie value itself, so a database leak does not yield
+// usable session cookies.
+func TestStoredSessionIsHashed(t *testing.T) {
 	token, err := newSessionToken()
 	if err != nil {
 		t.Fatalf("newSessionToken() returned error: %v", err)
 	}
 
-	key := sessionKey(token)
+	stored := hashToken(token)
 
-	if !strings.HasPrefix(key, sessionKeyPrefix) {
-		t.Errorf("sessionKey(...) = %q, want prefix %q", key, sessionKeyPrefix)
+	if strings.Contains(stored, token) {
+		t.Errorf("stored session key embeds the raw token\n  stored: %q\n  token:  %q",
+			stored, token)
 	}
-	if strings.Contains(key, token) {
-		t.Errorf("sessionKey(...) embeds the raw token; a database leak would "+
-			"yield usable cookies\n  key:   %q\n  token: %q", key, token)
-	}
-	if key == sessionKey(token+"x") {
-		t.Error("sessionKey collides for different tokens")
+	if stored == hashToken(token+"x") {
+		t.Error("hashToken collides for different tokens")
 	}
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"io"
@@ -295,5 +296,137 @@ func TestBearerToken(t *testing.T) {
 				t.Errorf("bearerToken() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLogoutInvalidatesSession(t *testing.T) {
+	s, db := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	// Sanity: the session works before logout.
+	if rec := do(t, s, "GET", "/api/status", "", cookie); rec.Code != http.StatusOK {
+		t.Fatalf("pre-logout status: got %d", rec.Code)
+	}
+
+	rec := do(t, s, "POST", "/api/auth/logout", "", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout: got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The cookie must be cleared client-side...
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("logout did not instruct the browser to delete the session cookie")
+	}
+
+	// ...and invalidated server-side, so replaying it fails.
+	if rec := do(t, s, "GET", "/api/status", "", cookie); rec.Code != http.StatusUnauthorized {
+		t.Errorf("replayed session after logout: got %d, want 401", rec.Code)
+	}
+
+	count, err := db.CountSessions()
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("%d session rows remain after logout, want 0", count)
+	}
+}
+
+func TestLogoutWithoutSessionSucceeds(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/logout", ""); rec.Code != http.StatusOK {
+		t.Errorf("logout without a session: got %d, want 200", rec.Code)
+	}
+}
+
+func TestSessionCookieAttributes(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	if !cookie.HttpOnly {
+		t.Error("session cookie is not HttpOnly; it is readable by script")
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("session cookie SameSite = %v, want Strict", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("session cookie Path = %q, want /", cookie.Path)
+	}
+	if cookie.Secure {
+		t.Error("session cookie is Secure on a plain-HTTP request; " +
+			"the browser would discard it and login would silently fail")
+	}
+}
+
+// TestSessionCookieIsSecureBehindTrustedProxy covers the opt-in path where an
+// operator has declared that Canarium is only reachable through a proxy.
+func TestSessionCookieIsSecureBehindTrustedProxy(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.Auth.TrustProxyHeaders = true
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: got %d", rec.Code)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName && !c.Secure {
+			t.Error("session cookie is not Secure despite X-Forwarded-Proto: https")
+		}
+	}
+}
+
+// TestForwardedProtoIsIgnoredWhenProxyNotTrusted: the header is
+// attacker-controlled when the daemon is reachable directly.
+func TestForwardedProtoIsIgnoredWhenProxyNotTrusted(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Secure {
+			t.Error("an untrusted X-Forwarded-Proto header set the Secure flag, " +
+				"which would break login over plain HTTP")
+		}
+	}
+}
+
+func TestStopBeforeStartDoesNotPanic(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	// Start was never called, so s.server is nil.
+	if err := s.Stop(context.Background()); err != nil {
+		t.Errorf("Stop before Start returned %v, want nil", err)
 	}
 }

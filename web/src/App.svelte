@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { checkAuth, refreshAll, connectWS, authenticated, status, connected } from './lib/stores/api.js';
+  import { checkAuth, refreshAll, connectWS, logout, authenticated, status, connected } from './lib/stores/api.js';
   import Dashboard from './routes/Dashboard.svelte';
   import Clients from './routes/Clients.svelte';
   import Plans from './routes/Plans.svelte';
@@ -9,6 +9,14 @@
 
   let currentView = 'dashboard';
   let pollTimer;
+
+  async function handleLogout() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    await logout();
+  }
 
   const views = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -76,6 +84,12 @@
             </span>
           </div>
         {/if}
+        <button
+          class="mt-2 text-[10px] text-ink-muted hover:text-ink transition-colors"
+          onclick={handleLogout}
+        >
+          Sign out
+        </button>
       </div>
     </nav>
 

@@ -134,6 +134,30 @@ export async function setup(password) {
   }
 }
 
+/** Ends the session server-side and returns to the login screen. */
+export async function logout() {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (e) {
+    console.error('logout request failed:', e);
+  } finally {
+    // Clear local state regardless: the cookie may already be gone, and
+    // leaving the dashboard up after a logout attempt is worse than
+    // returning to the login screen.
+    disconnectWS();
+    authenticated.set(false);
+    status.set(null);
+    facts.set({});
+    clients.set([]);
+    plans.set([]);
+    sequence.set(null);
+    events.set([]);
+  }
+}
+
 export async function refreshAll() {
   try {
     const [s, f, c, p, seq] = await Promise.all([
@@ -206,4 +230,19 @@ export function connectWS() {
   ws.onerror = () => {
     ws?.close();
   };
+}
+
+/** Closes the event stream and cancels any pending reconnect. */
+export function disconnectWS() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (ws) {
+    // Drop the handler first so onclose does not schedule a reconnect.
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  connected.set(false);
 }
