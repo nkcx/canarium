@@ -3,7 +3,8 @@
 # Prerequisites:
 #   1. Find your UPS USB device: lsusb | grep -i ups
 #   2. Copy .env.example to .env and fill in your values
-#   3. docker compose up -d
+#   3. Uncomment the `devices:` entry under the nut service for your UPS
+#   4. docker compose up -d
 #
 # NUT configuration:
 #   For most USB-connected UPS units, the env vars below are sufficient.
@@ -35,8 +36,8 @@ services:
     container_name: nut
     restart: unless-stopped
     environment:
-      - API_USER=canarium
-      - API_PASSWORD=${NUT_PASSWORD}
+      - API_USER=${NUT_USER:-canarium}
+      - API_PASSWORD=${NUT_PASSWORD:?NUT_PASSWORD must be set in .env}
       - DRIVER=${NUT_DRIVER:-usbhid-ups}
       - NAME=${NUT_UPS_NAME:-ups}
       - PORT=auto
@@ -45,18 +46,25 @@ services:
       - VENDORID=${NUT_VENDORID:-}
       - POLLINTERVAL=${NUT_POLL_INTERVAL:-15}
       - MAXAGE=${NUT_MAXAGE:-15}
-    ports:
-      - "3493:3493"
-    # USB passthrough — required for local UPS connection.
-    # Option 1 (recommended): pass the specific USB device.
-    #   Find it with: lsusb | grep -i ups
-    #   Example: Bus 001 Device 004 → /dev/bus/usb/001/004
-    # Option 2: privileged mode (less secure, but survives USB re-enumeration)
+    # NUT is reached by Canarium over the compose network; it does not need
+    # to be published on the host. Uncomment only if you have other NUT
+    # clients outside this stack, and prefer binding to a specific interface
+    # (e.g. "127.0.0.1:3493:3493") over 0.0.0.0.
+    # ports:
+    #   - "3493:3493"
     #
-    # Uncomment ONE of these:
+    # USB passthrough — required for a locally connected UPS.
+    # Find your device with: lsusb | grep -i ups
+    # Example: Bus 001 Device 004 -> /dev/bus/usb/001/004
+    #
+    # Uncomment and set the path for your UPS:
     # devices:
     #   - /dev/bus/usb/001/004:/dev/bus/usb/001/004
-    privileged: true
+    #
+    # `privileged: true` also works and survives USB re-enumeration, but it
+    # grants the container full access to every host device. Prefer the
+    # explicit `devices:` mapping above unless re-enumeration is a real
+    # problem for your hardware.
 
   canarium:
     image: ghcr.io/nkcx/canarium:latest
@@ -64,12 +72,31 @@ services:
     restart: unless-stopped
     depends_on:
       - nut
+    # Credentials referenced from canarium.yaml as ${VAR} are expanded from
+    # the process environment at config load time, so the file must be passed
+    # through to the container. Without this, ${PROXMOX_TOKEN} and friends
+    # stay unexpanded and every transport fails to authenticate.
+    env_file:
+      - .env
     ports:
-      - "8420:8420"
+      # The API has no TLS of its own. Publishing on 0.0.0.0 exposes the
+      # admin interface to your whole network; bind to localhost and front it
+      # with a reverse proxy, or restrict to a management interface.
+      - "127.0.0.1:8420:8420"
     volumes:
       - ./canarium.yaml:/etc/canarium/config.yaml:ro
       - canarium-data:/var/lib/canarium
-    # Uncomment for GPIO support on Raspberry Pi:
+    # The image runs as uid/gid 65532. A named volume inherits that
+    # ownership automatically; a bind mount must be chowned on the host.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Canarium targets a 128 MB footprint. Capping it makes a regression
+    # visible as a restart rather than as host memory pressure.
+    mem_limit: 256m
+    # Uncomment for GPIO support on Raspberry Pi. The container user must be
+    # in a group that can access the chardev (gpio group on Raspberry Pi OS).
     # devices:
     #   - /dev/gpiochip0:/dev/gpiochip0
     #
@@ -84,6 +111,7 @@ services:
     # labels:
     #   - "traefik.enable=true"
     #   - "traefik.http.routers.canarium.rule=Host(`canarium.example.com`)"
+    #   - "traefik.http.routers.canarium.tls=true"
     #   - "traefik.http.services.canarium.loadbalancer.server.port=8420"
 
 volumes:
