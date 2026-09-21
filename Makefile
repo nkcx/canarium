@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # host and cross-compiled targets.
 export CGO_ENABLED = 0
 
-.PHONY: all build build-frontend build-go test test-race lint fmt vet check clean dev dist
+.PHONY: all build build-frontend build-go test test-race lint fmt vet govulncheck audit check clean distclean dev dist
 
 all: build
 
@@ -22,14 +22,23 @@ build-go:
 test:
 	go test ./...
 
+# The race detector is implemented in C, so this target is the one place
+# cgo is required. Everything else builds with CGO_ENABLED=0 so the binary
+# stays static and cross-compiles.
 test-race:
-	go test -race -count=1 ./...
+	CGO_ENABLED=1 go test -race -count=1 ./...
 
 fmt:
 	gofmt -w ./cmd ./internal ./modules ./web.go
 
 vet:
 	go vet ./...
+
+govulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+audit:
+	cd web && npm audit --audit-level=high
 
 lint:
 	golangci-lint run
