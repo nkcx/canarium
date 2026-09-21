@@ -157,6 +157,22 @@ var migrations = []migration{
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_name ON api_tokens(name)`,
 		},
 	},
+	{
+		version: 7,
+		name:    "sequence abort and post-shutdown bookkeeping",
+		stmts: []string{
+			// Whether a sequence was called off, so its terminal state can
+			// record that rather than reporting a clean completion.
+			`ALTER TABLE sequences ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0`,
+			// Whether the plan's post-shutdown action has already run.
+			// Without this, resuming a sequence that was past its shutdown
+			// stages ran it again — telling the UPS to cut its outlets while
+			// the fleet was booting on returning mains.
+			`ALTER TABLE sequences ADD COLUMN post_shutdown_run INTEGER NOT NULL DEFAULT 0`,
+			// Pending intents are looked up per sequence during recovery.
+			`CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(sequence_id, status)`,
+		},
+	},
 }
 
 // migrate brings the database up to the latest schema version.

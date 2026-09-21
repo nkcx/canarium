@@ -8,11 +8,17 @@ import (
 
 	"github.com/nkcx/canarium/internal/config"
 	"github.com/nkcx/canarium/internal/facts"
+	"github.com/nkcx/canarium/internal/netutil"
 	"github.com/nkcx/canarium/internal/state"
 )
 
 // executeSequence runs a plan from the beginning.
-func (e *Executor) executeSequence(plan *config.PlanConfig) {
+// newSequenceFor builds the sequence record for a plan, without any work
+// that could block.
+//
+// Kept separate from executeSequence so the caller can claim the active-
+// sequence slot synchronously, before the slow parts run.
+func (e *Executor) newSequenceFor(plan *config.PlanConfig) *ActiveSequence {
 	now := time.Now()
 
 	preState := make(map[string]string, len(e.cfg.Clients))
@@ -20,34 +26,30 @@ func (e *Executor) executeSequence(plan *config.PlanConfig) {
 		preState[c.Name] = e.GetClientState(c.Name).String()
 	}
 
-	seq := &state.Sequence{
-		ID:           fmt.Sprintf("seq_%d", now.UnixNano()),
-		PlanName:     plan.Name,
-		State:        SeqStateShuttingDown,
-		CurrentStage: 0,
-		StartedAt:    now,
-
+	return newActiveSequence(&state.Sequence{
+		ID:               fmt.Sprintf("seq_%d", now.UnixNano()),
+		PlanName:         plan.Name,
+		State:            SeqStateShuttingDown,
+		CurrentStage:     0,
+		StartedAt:        now,
 		PreSequenceState: preState,
+	}, plan)
+}
 
-		// Pin addresses now, while the network is still whole. A power event
-		// often takes out the DNS server too, and by wake time the names in
-		// the config may no longer resolve.
-		ResolvedAddrs: e.resolveClientAddresses(e.ctx),
+// executeSequence runs a plan that has already claimed the active slot.
+func (e *Executor) executeSequence(as *ActiveSequence) {
+	// Pin addresses while the network is still whole. A power event often
+	// takes out the DNS server too, and by wake time the names in the config
+	// may no longer resolve. This can take seconds per unresolvable name,
+	// which is why the slot was claimed before we got here.
+	as.SetResolvedAddrs(e.resolveClientAddresses(e.ctx))
 
-		// Record the configuration in effect, so the journal says what the
-		// daemon was actually running when it acted.
-		ConfigSnapshot: e.configSnapshot(),
-	}
-
-	as := newActiveSequence(seq, plan)
-	if !e.setActiveSequence(as) {
-		e.logger.Warn("declining to start a sequence; one is already running",
-			"plan", plan.Name)
-		return
-	}
+	// Record the configuration in effect, so the journal says what the
+	// daemon was actually running when it acted.
+	as.SetConfigSnapshot(e.configSnapshot())
 
 	e.saveSequence(as)
-	e.logger.Info("sequence started", "sequence", as.ID(), "plan", plan.Name)
+	e.logger.Info("sequence started", "sequence", as.ID(), "plan", as.PlanName())
 
 	e.runShutdownStages(as)
 }
@@ -55,6 +57,38 @@ func (e *Executor) executeSequence(plan *config.PlanConfig) {
 // resumeSequence continues a sequence that was interrupted by a restart,
 // picking up at the first stage with no recorded completion.
 func (e *Executor) resumeSequence(as *ActiveSequence) {
+	// Where a sequence resumes depends on what phase it was in, not only on
+	// which stages have records.
+	//
+	// An earlier version ignored the persisted state entirely and always
+	// called runShutdownStages. Two ways that went wrong:
+	//
+	//   - A sequence aborted during stage 0 has no records for stages 1..N,
+	//     so resume computed "start at stage 1" and shut down every host the
+	//     operator had just explicitly spared.
+	//
+	//   - A sequence already past its shutdown stages fell straight through
+	//     the (empty) stage loop into executePostShutdown, telling the UPS to
+	//     cut its outlets a second time — while the fleet was booting on
+	//     returning mains.
+	switch as.State() {
+	case SeqStateAborting, SeqStateAborted:
+		// The operator, or the plan's own abort condition, called this off
+		// before the restart. Honour that: settle anything still shutting
+		// down and hand over to the wake plan.
+		e.logger.Info("resuming an aborted sequence; no further stages will run",
+			"sequence", as.ID(), "plan", as.PlanName())
+		e.resumeAbort(as)
+		return
+
+	case SeqStateWakeGate, SeqStateWaking:
+		// Shutdown is finished and post-shutdown has already run. Rejoin at
+		// the wake gate.
+		e.logger.Info("resuming at the wake gate", "sequence", as.ID(), "plan", as.PlanName())
+		e.runWake(as)
+		return
+	}
+
 	completed, err := e.db.GetCompletedStages(e.ctx, as.ID())
 	if err != nil {
 		e.logger.Error("reading completed stages; resuming from the recorded stage",
@@ -76,8 +110,92 @@ func (e *Executor) resumeSequence(as *ActiveSequence) {
 	}
 	as.SetCurrentStage(resumeAt)
 
+	// Reconcile the intent journal before acting. An intent still marked
+	// "dispatching" means the daemon died between recording the intent and
+	// the transport returning, so we do not know whether the command was
+	// actually delivered. SPEC §8.4 calls for probing before deciding.
+	e.reconcileIntents(as)
+
 	e.logger.Info("resuming sequence", "sequence", as.ID(), "stage", resumeAt)
 	e.runShutdownStages(as)
+}
+
+// resumeAbort continues an abort that was interrupted by a restart.
+func (e *Executor) resumeAbort(as *ActiveSequence) {
+	e.waitForShuttingDown(as)
+
+	as.SetState(SeqStateWakeGate)
+	e.saveSequence(as)
+	e.runWake(as)
+}
+
+// reconcileIntents inspects the journal for actions whose outcome is unknown.
+//
+// The intents table has been written since the first commit and never read.
+// An intent left at "dispatching" means the daemon died after recording its
+// intention to act and before the transport returned — so the command may or
+// may not have reached the host. Probing tells us which, and a host that
+// turns out to be down does not need shutting down again.
+func (e *Executor) reconcileIntents(as *ActiveSequence) {
+	pending, err := e.db.PendingIntents(e.ctx, as.ID())
+	if err != nil {
+		e.logger.Error("reading pending intents", "sequence", as.ID(), "error", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	seqID := as.ID()
+
+	for _, intent := range pending {
+		clientCfg := e.findClientConfig(intent.ClientName)
+		if clientCfg == nil {
+			e.logger.Warn("pending intent names a client no longer in the config",
+				"client", intent.ClientName, "action", intent.Action)
+			continue
+		}
+
+		e.logger.Warn("an action was in flight when the daemon stopped; "+
+			"probing to find out whether it took effect",
+			"client", intent.ClientName, "action", intent.Action)
+
+		transport, ok := e.transports[clientCfg.Transport]
+		if !ok {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(e.ctx, probeTimeout)
+		probeState, probeErr := transport.Probe(ctx, e.buildClientFor(as, clientCfg))
+		cancel()
+
+		outcome := "unknown"
+		switch {
+		case probeErr != nil:
+			// Cannot tell. Leave the client where it is; the stage loop will
+			// re-dispatch, and shutdown commands are idempotent.
+			e.setClientState(intent.ClientName, StateDownUnverified, &seqID)
+			outcome = "indeterminate"
+		case probeState == StateDown:
+			// The command landed.
+			e.setClientState(intent.ClientName, StateDown, &seqID)
+			outcome = "took effect"
+		case probeState == StateUp:
+			// Still up, so it will be re-dispatched by the stage loop.
+			e.setClientState(intent.ClientName, StateUp, &seqID)
+			outcome = "did not take effect"
+		}
+
+		intent.Status = state.IntentReconciled
+		intent.Result = &state.ActionResult{
+			Success: probeState == StateDown,
+			Message: "reconciled after restart: " + outcome,
+		}
+		e.saveIntent(intent)
+
+		e.logger.Info("reconciled an in-flight action",
+			"client", intent.ClientName, "action", intent.Action, "outcome", outcome)
+	}
 }
 
 // runShutdownStages walks a plan's shutdown stages in order.
@@ -150,7 +268,16 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 	}
 
 	if plan.Shutdown.PostShutdown != nil {
-		e.executePostShutdown(plan.Shutdown.PostShutdown)
+		// Exactly once per sequence. Telling the UPS to cut its outlets a
+		// second time — which a resume used to do — would drop power to a
+		// fleet that is already booting on returning mains.
+		if as.MarkPostShutdownRun() {
+			e.executePostShutdown(plan.Shutdown.PostShutdown)
+			e.saveSequence(as)
+		} else {
+			e.logger.Info("post-shutdown has already run for this sequence; skipping",
+				"sequence", as.ID())
+		}
 	}
 
 	as.SetState(SeqStateWakeGate)
@@ -399,7 +526,7 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 		ClientName: name,
 		Action:     "shutdown",
 		Timestamp:  time.Now(),
-		Status:     "dispatching",
+		Status:     state.IntentDispatching,
 	}
 	e.saveIntent(intent)
 
@@ -407,7 +534,7 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 
 	if e.Mode() == ModeDryRun {
 		e.logger.Info("[dry-run] would shut down", "client", name)
-		intent.Status = "dispatched"
+		intent.Status = state.IntentDispatched
 		intent.Result = &state.ActionResult{Success: true, Message: "dry-run"}
 		e.saveIntent(intent)
 
@@ -422,7 +549,7 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 	defer cancel()
 
 	actionResult, execErr := t.Execute(ctx, client, remapAction(t, ActionShutdown))
-	intent.Status = "dispatched"
+	intent.Status = state.IntentDispatched
 	switch {
 	case execErr != nil:
 		intent.Result = &state.ActionResult{Success: false, Message: execErr.Error()}
@@ -486,6 +613,7 @@ func (e *Executor) handleAbort(as *ActiveSequence) {
 	e.logger.Info("sequence aborted", "sequence", as.ID(), "plan", as.PlanName(), "reason", reason)
 
 	as.SetState(SeqStateAborting)
+	as.MarkAborted()
 	e.saveSequence(as)
 	e.emit(Event{Type: "abort", Timestamp: time.Now(), Data: as.PlanName()})
 
@@ -536,6 +664,17 @@ func (e *Executor) runWake(as *ActiveSequence) {
 	plan := as.Plan()
 
 	for e.evaluator.Evaluate(&plan.Wake.Gate, time.Now()) != facts.True {
+		// An operator can call off a sequence while it waits at the gate.
+		// runWake previously never looked, so the API acknowledged the abort
+		// and the daemon woke the fleet anyway.
+		if requested, reason := as.AbortRequested(); requested {
+			e.logger.Info("abandoning the wake gate: abort requested",
+				"sequence", as.ID(), "reason", reason)
+			as.MarkAborted()
+			e.completeSequence(as)
+			return
+		}
+
 		if !e.sleep(e.timings.WakeGatePoll) {
 			e.logger.Info("wake gate wait interrupted by shutdown", "sequence", as.ID())
 			e.clearActiveSequence()
@@ -555,6 +694,14 @@ func (e *Executor) runWake(as *ActiveSequence) {
 	seqID := as.ID()
 
 	for i, name := range order {
+		if requested, reason := as.AbortRequested(); requested {
+			e.logger.Info("stopping the wake sequence: abort requested",
+				"sequence", as.ID(), "reason", reason, "woken", i, "remaining", len(order)-i)
+			as.MarkAborted()
+			e.completeSequence(as)
+			return
+		}
+
 		clientCfg := e.findClientConfig(name)
 		if clientCfg == nil {
 			e.logger.Error("wake order references an unknown client", "client", name)
@@ -582,13 +729,24 @@ func (e *Executor) runWake(as *ActiveSequence) {
 		if e.GetClientState(name) == StateDownUnverified {
 			guard := e.duration(clientCfg.GuardPeriod, config.DefaultGuardPeriod(),
 				"guard_period", "client", name)
-			// The host may still be completing its shutdown; waking it now
-			// could interrupt that and leave it in an unknown state.
-			e.logger.Info("waiting out the guard period before waking an unverified host",
-				"client", name, "guard_period", guard)
-			if !e.sleep(guard) {
-				e.clearActiveSequence()
-				return
+
+			// The guard period exists because a host we could not confirm
+			// down may still be completing its shutdown, and waking it
+			// mid-flight leaves it in an unknown state. What matters is time
+			// elapsed since it settled, not time spent waiting here.
+			//
+			// Sleeping the full period per client made the wait cumulative:
+			// ten clients at the default 60s meant ten minutes of sequential
+			// sleeping even when the outage had ended hours earlier and
+			// every machine had been cold the whole time.
+			remaining := guard - e.timeSinceSettled(name)
+			if remaining > 0 {
+				e.logger.Info("waiting out the remainder of the guard period",
+					"client", name, "guard_period", guard, "remaining", remaining)
+				if !e.sleep(remaining) {
+					e.clearActiveSequence()
+					return
+				}
 			}
 		}
 
@@ -606,13 +764,24 @@ func (e *Executor) runWake(as *ActiveSequence) {
 }
 
 // completeSequence records terminal state and releases the sequence.
+//
+// An aborted sequence is recorded as aborted. It previously finished as
+// "completed" regardless, so the journal claimed a clean run for a sequence
+// an operator had called off — and SeqStateAborted was never written at all.
 func (e *Executor) completeSequence(as *ActiveSequence) {
-	as.MarkCompleted(SeqStateCompleted, time.Now())
+	finalState := SeqStateCompleted
+	if as.WasAborted() {
+		finalState = SeqStateAborted
+	}
+
+	as.MarkCompleted(finalState, time.Now())
 	e.saveSequence(as)
 	e.releaseSequence(as)
 
-	e.emit(Event{Type: "sequence_completed", Timestamp: time.Now(), Data: as.PlanName()})
-	e.logger.Info("sequence completed", "sequence", as.ID(), "plan", as.PlanName())
+	e.emit(Event{Type: "sequence_completed", Timestamp: time.Now(),
+		Data: map[string]any{"plan": as.PlanName(), "state": finalState}})
+	e.logger.Info("sequence finished",
+		"sequence", as.ID(), "plan", as.PlanName(), "state", finalState)
 }
 
 // releaseSequence drops the sequence's client locks and clears it as active.
@@ -676,7 +845,7 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 	}
 
 	client := e.buildClientFor(as, clientCfg)
-	probeTransport, hasProbe := e.transports[clientCfg.Transport]
+	probe := e.wakeProbe(clientCfg)
 
 	for attempt := 0; attempt <= retries; attempt++ {
 		if _, err := t.Execute(e.ctx, client, remapAction(t, ActionWake)); err != nil {
@@ -684,10 +853,11 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 				"client", name, "attempt", attempt, "error", err)
 		}
 
-		if !hasProbe {
-			// Nothing can confirm the host came up; treat dispatch as
-			// success rather than looping pointlessly to the boot deadline.
-			e.logger.Warn("no probe-capable transport; wake cannot be verified",
+		if probe == nil {
+			// Nothing can confirm the host came up. Report the dispatch and
+			// stop, rather than looping to the boot deadline on every retry.
+			e.logger.Warn("wake cannot be verified for this client; "+
+				"set an address and a probe port to confirm it comes back",
 				"client", name)
 			e.setClientState(name, StateUp, &seqID)
 			return
@@ -695,7 +865,13 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 
 		deadline := time.Now().Add(bootDeadline)
 		for time.Now().Before(deadline) {
-			probeState, probeErr := probeTransport.Probe(e.ctx, client)
+			if requested, _ := as.AbortRequested(); requested {
+				e.logger.Info("abandoning wake verification: abort requested",
+					"client", name)
+				return
+			}
+
+			probeState, probeErr := probe(e.ctx, client)
 			if probeErr == nil && probeState == StateUp {
 				e.setClientState(name, StateUp, &seqID)
 				e.emit(Event{Type: "client_wake_success", Timestamp: time.Now(), Data: name})
@@ -709,6 +885,70 @@ func (e *Executor) wakeClient(name string, as *ActiveSequence) {
 
 	e.setClientState(name, StateFailed, &seqID)
 	e.emit(Event{Type: "client_wake_failed", Timestamp: time.Now(), Data: name})
+}
+
+// probeFunc reports a client's power state.
+type probeFunc func(context.Context, *Client) (ClientState, error)
+
+// wakeProbe returns something that can confirm a client came back up, or nil
+// if nothing can.
+//
+// The client's own transport is preferred, but only when it actually
+// advertises ActionProbe. An earlier version took the transport's presence in
+// the registry as proof it could probe — so a client whose transport is wol
+// or nut (neither of which can probe) had every wake attempt spin to the full
+// boot deadline before being marked failed. With the default three retries
+// and a five-minute deadline, that was fifteen minutes per client, and the
+// client was marked failed regardless.
+//
+// When the transport cannot probe but the client has an address, fall back to
+// a plain TCP check. A machine that has just been woken is expected to start
+// answering on something.
+func (e *Executor) wakeProbe(c *config.ClientConfig) probeFunc {
+	if transport, ok := e.transports[c.Transport]; ok && transportCan(transport, ActionProbe) {
+		return transport.Probe
+	}
+
+	if c.Address == "" {
+		return nil
+	}
+
+	port := defaultWakeProbePort
+	if c.Probe != nil && c.Probe.Port != 0 {
+		port = c.Probe.Port
+	}
+
+	e.logger.Info("the configured transport cannot probe; "+
+		"verifying wake with a TCP check instead",
+		"client", c.Name, "port", port)
+
+	return func(ctx context.Context, client *Client) (ClientState, error) {
+		addr := netutil.HostPort(client.Address, port)
+
+		timeout := client.ProbeConfig.Timeout
+		if timeout <= 0 {
+			timeout = defaultProbeTimeout
+		}
+
+		switch reach, err := netutil.ProbeTCP(ctx, addr, timeout); reach {
+		case netutil.Reachable:
+			return StateUp, nil
+		case netutil.Unreachable:
+			return StateDown, nil
+		default:
+			return StateUnknown, err
+		}
+	}
+}
+
+// transportCan reports whether a transport advertises an action.
+func transportCan(t Transport, action ActionType) bool {
+	for _, capability := range t.Capabilities() {
+		if capability.Action == action {
+			return true
+		}
+	}
+	return false
 }
 
 // executePostShutdown runs the plan's post-shutdown action, typically telling

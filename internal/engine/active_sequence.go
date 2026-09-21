@@ -50,6 +50,52 @@ type ActiveSequence struct {
 	heldStage string
 }
 
+// SetResolvedAddrs records the addresses pinned at sequence start.
+func (a *ActiveSequence) SetResolvedAddrs(addrs map[string]state.ResolvedAddr) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seq.ResolvedAddrs = addrs
+}
+
+// SetConfigSnapshot records the configuration in effect for this sequence.
+func (a *ActiveSequence) SetConfigSnapshot(snapshot []byte) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seq.ConfigSnapshot = snapshot
+}
+
+// MarkAborted records that this sequence was called off, so the terminal
+// state reflects that rather than reporting a clean completion.
+func (a *ActiveSequence) MarkAborted() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.seq.Aborted = true
+}
+
+// WasAborted reports whether the sequence was called off.
+func (a *ActiveSequence) WasAborted() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.seq.Aborted
+}
+
+// MarkPostShutdownRun claims the right to run the plan's post-shutdown
+// action, reporting whether this caller won.
+//
+// Post-shutdown typically tells the UPS to cut its outlets. Running it twice
+// — which a resume through the wake phase used to do — drops power to a
+// fleet that is already booting.
+func (a *ActiveSequence) MarkPostShutdownRun() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.seq.PostShutdownRun {
+		return false
+	}
+	a.seq.PostShutdownRun = true
+	return true
+}
+
 // RequestProceed releases a stage that is holding on its entry condition.
 func (a *ActiveSequence) RequestProceed(reason string) {
 	a.mu.Lock()
@@ -237,6 +283,7 @@ type SequenceSnapshot struct {
 	TotalStages    int        `json:"total_stages"`
 	PonrCrossed    bool       `json:"ponr_crossed"`
 	Abortable      bool       `json:"abortable"`
+	Aborted        bool       `json:"aborted"`
 	AbortRequested bool       `json:"abort_requested"`
 	AbortReason    string     `json:"abort_reason,omitempty"`
 	HeldStage      string     `json:"held_stage,omitempty"`
@@ -258,6 +305,7 @@ func (a *ActiveSequence) Snapshot() SequenceSnapshot {
 		TotalStages:    len(a.plan.Shutdown.Stages),
 		PonrCrossed:    a.seq.PonrCrossed,
 		Abortable:      !a.seq.PonrCrossed,
+		Aborted:        a.seq.Aborted,
 		AbortRequested: a.abortRequested,
 		AbortReason:    a.abortReason,
 		HeldStage:      a.heldStage,

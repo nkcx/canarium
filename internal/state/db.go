@@ -137,24 +137,32 @@ func (d *DB) SaveSequence(ctx context.Context, seq *Sequence) error {
 	}
 
 	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO sequences (id, plan_name, state, current_stage, ponr_crossed, started_at, completed_at, config_snapshot, pre_sequence_state, resolved_addrs)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sequences (
+			id, plan_name, state, current_stage, ponr_crossed, started_at,
+			completed_at, config_snapshot, pre_sequence_state, resolved_addrs,
+			aborted, post_shutdown_run)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			state=excluded.state,
 			current_stage=excluded.current_stage,
 			ponr_crossed=excluded.ponr_crossed,
-			completed_at=excluded.completed_at
+			completed_at=excluded.completed_at,
+			aborted=excluded.aborted,
+			post_shutdown_run=excluded.post_shutdown_run
 	`, seq.ID, seq.PlanName, seq.State, seq.CurrentStage, seq.PonrCrossed,
 		seq.StartedAt.Format(time.RFC3339Nano), completedAt,
-		seq.ConfigSnapshot, string(preState), string(resolved))
+		seq.ConfigSnapshot, string(preState), string(resolved),
+		seq.Aborted, seq.PostShutdownRun)
 	return err
 }
 
 func (d *DB) GetActiveSequence(ctx context.Context) (*Sequence, error) {
 	row := d.db.QueryRowContext(ctx, `
-		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at, completed_at, config_snapshot, pre_sequence_state, resolved_addrs
+		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at,
+		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs,
+		       aborted, post_shutdown_run
 		FROM sequences
-		WHERE state NOT IN ('completed', 'failed', 'idle')
+		WHERE state NOT IN ('completed', 'failed', 'aborted', 'idle')
 		ORDER BY started_at DESC
 		LIMIT 1
 	`)
@@ -169,7 +177,8 @@ func scanSequence(row *sql.Row) (*Sequence, error) {
 	var completedAt, configSnapshot *string
 
 	err := row.Scan(&seq.ID, &seq.PlanName, &seq.State, &seq.CurrentStage, &seq.PonrCrossed,
-		&startedAt, &completedAt, &configSnapshot, &preState, &resolved)
+		&startedAt, &completedAt, &configSnapshot, &preState, &resolved,
+		&seq.Aborted, &seq.PostShutdownRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -206,7 +215,8 @@ func scanSequence(row *sql.Row) (*Sequence, error) {
 func (d *DB) LastSequence(ctx context.Context) (*Sequence, error) {
 	row := d.db.QueryRowContext(ctx, `
 		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at,
-		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs
+		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs,
+		       aborted, post_shutdown_run
 		FROM sequences
 		ORDER BY started_at DESC
 		LIMIT 1
@@ -399,11 +409,20 @@ func (d *DB) GetPasswordHash(ctx context.Context) (string, error) {
 }
 
 type Sequence struct {
-	ID               string
-	PlanName         string
-	State            string
-	CurrentStage     int
-	PonrCrossed      bool
+	ID           string
+	PlanName     string
+	State        string
+	CurrentStage int
+	PonrCrossed  bool
+
+	// Aborted records that the sequence was called off, so its terminal
+	// state can say so rather than reporting a clean completion.
+	Aborted bool
+
+	// PostShutdownRun records that the plan's post-shutdown action has
+	// already executed, so a resume does not run it a second time.
+	PostShutdownRun bool
+
 	StartedAt        time.Time
 	CompletedAt      *time.Time
 	ConfigSnapshot   []byte

@@ -228,10 +228,15 @@ func (h *harness) runSequence(planName string, timeout time.Duration) {
 		h.t.Fatalf("plan %q not found", planName)
 	}
 
+	as := h.exec.newSequenceFor(plan)
+	if !h.exec.setActiveSequence(as) {
+		h.t.Fatal("a sequence is already active")
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.exec.executeSequence(plan)
+		h.exec.executeSequence(as)
 	}()
 
 	select {
@@ -255,10 +260,15 @@ func (h *harness) startSequence(planName string) <-chan struct{} {
 		h.t.Fatalf("plan %q not found", planName)
 	}
 
+	as := h.exec.newSequenceFor(plan)
+	if !h.exec.setActiveSequence(as) {
+		h.t.Fatal("a sequence is already active")
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.exec.executeSequence(plan)
+		h.exec.executeSequence(as)
 	}()
 	return done
 }

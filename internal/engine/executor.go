@@ -54,6 +54,27 @@ const probeTimeout = 10 * time.Second
 // are measured in days, so checking hourly is ample.
 const retentionInterval = 1 * time.Hour
 
+const (
+	// defaultWakeProbePort is used to verify a wake when the client's own
+	// transport cannot probe. SSH is the most likely thing to be listening
+	// on a machine that has just booted.
+	defaultWakeProbePort = 22
+
+	// defaultProbeTimeout bounds a reachability check when the client
+	// specifies none.
+	//
+	// It is deliberately longer than the kernel's ARP resolution window
+	// (three solicitations roughly a second apart). A host that has powered
+	// off on a directly attached subnet is reported EHOSTUNREACH once ARP
+	// gives up, which is positive evidence it is down; a shorter timeout
+	// would cut that short and yield an inconclusive result instead.
+	defaultProbeTimeout = 5 * time.Second
+)
+
+// modeKey is the key-value entry holding the operating mode selected at
+// runtime.
+const modeKey = "mode"
+
 // DefaultTimings returns the production polling intervals.
 func DefaultTimings() Timings {
 	return Timings{
@@ -80,7 +101,12 @@ type Executor struct {
 	mu             sync.RWMutex
 	activeSequence *ActiveSequence
 	clientStates   map[string]ClientState
-	listeners      []EventListener
+
+	// clientStateSince records when each client last changed state, so the
+	// wake path can credit time a host has already spent settled rather
+	// than sleeping the full guard period for every client in turn.
+	clientStateSince map[string]time.Time
+	listeners        []EventListener
 
 	// upsSourcesOnce guards the cached list of UPS-reporting source
 	// instances, which is derived from the store's declarations and does not
@@ -109,17 +135,18 @@ func NewExecutor(
 ) *Executor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Executor{
-		cfg:          cfg,
-		store:        store,
-		evaluator:    evaluator,
-		db:           db,
-		transports:   make(map[string]Transport),
-		mode:         ParseMode(cfg.Canarium.Mode),
-		logger:       logger,
-		timings:      DefaultTimings(),
-		clientStates: make(map[string]ClientState),
-		ctx:          ctx,
-		cancel:       cancel,
+		cfg:              cfg,
+		store:            store,
+		evaluator:        evaluator,
+		db:               db,
+		transports:       make(map[string]Transport),
+		mode:             ParseMode(cfg.Canarium.Mode),
+		logger:           logger,
+		timings:          DefaultTimings(),
+		clientStates:     make(map[string]ClientState),
+		clientStateSince: make(map[string]time.Time),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 }
 
@@ -189,7 +216,11 @@ func (e *Executor) GetAllClientStates() map[string]ClientState {
 
 func (e *Executor) setClientState(name string, s ClientState, seqID *string) {
 	e.mu.Lock()
+	previous, existed := e.clientStates[name]
 	e.clientStates[name] = s
+	if !existed || previous != s {
+		e.clientStateSince[name] = time.Now()
+	}
 	e.mu.Unlock()
 
 	// A lost client-state write means the executor's view and the journal
@@ -203,6 +234,22 @@ func (e *Executor) setClientState(name string, s ClientState, seqID *string) {
 		Timestamp: time.Now(),
 		Data:      map[string]string{"client": name, "state": s.String()},
 	})
+}
+
+// timeSinceSettled reports how long a client has been in its current state.
+//
+// Returns zero when the transition was not observed by this process — after
+// a restart, for instance — so the caller waits the full period rather than
+// assuming credit it cannot prove.
+func (e *Executor) timeSinceSettled(name string) time.Duration {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	since, ok := e.clientStateSince[name]
+	if !ok || since.IsZero() {
+		return 0
+	}
+	return time.Since(since)
 }
 
 // ActiveSequence returns the sequence currently running, or nil.
@@ -255,7 +302,9 @@ func (e *Executor) saveSequence(as *ActiveSequence) {
 }
 
 func (e *Executor) Start() error {
-	e.logger.Info("executor starting", "mode", e.mode)
+	e.restoreMode()
+
+	e.logger.Info("executor starting", "mode", e.Mode())
 
 	e.registerDerivedFacts()
 	e.updateDerivedFacts(time.Now())
@@ -270,6 +319,52 @@ func (e *Executor) Start() error {
 	go e.retentionLoop()
 
 	return nil
+}
+
+// restoreMode reinstates the operating mode an operator last selected.
+//
+// handleSetMode has always persisted the mode to the key-value table and
+// nothing ever read it back, so a daemon restart silently reverted to
+// whatever the YAML said. An operator who armed Canarium through the web UI
+// and then rebooted the host came back up disarmed, with nothing to say so —
+// the fleet unprotected for the next outage.
+//
+// config_readonly reverses the precedence: there, the file is authoritative
+// by definition and a stored mode is ignored.
+func (e *Executor) restoreMode() {
+	if e.cfg.Canarium.ConfigReadonly {
+		return
+	}
+
+	stored, err := e.db.GetKV(e.ctx, modeKey)
+	if err != nil {
+		e.logger.Error("reading the persisted operating mode; using the configured one",
+			"error", err)
+		return
+	}
+	if stored == "" {
+		return
+	}
+
+	mode, ok := ParseModeStrict(stored)
+	if !ok {
+		e.logger.Error("the persisted operating mode is not recognised; using the configured one",
+			"stored", stored)
+		return
+	}
+
+	configured := ParseMode(e.cfg.Canarium.Mode)
+	if mode == configured {
+		return
+	}
+
+	e.mu.Lock()
+	e.mode = mode
+	e.mu.Unlock()
+
+	e.logger.Warn("restored the operating mode set at runtime, which differs from the config file",
+		"restored", mode.String(), "config_file", configured.String(),
+		"hint", "set canarium.config_readonly to make the file authoritative")
 }
 
 func (e *Executor) Stop() {
@@ -295,8 +390,19 @@ func (e *Executor) restoreState() error {
 		e.logger.Info("resuming active sequence", "id", seq.ID, "plan", seq.PlanName, "stage", seq.CurrentStage)
 		plan := e.findPlan(seq.PlanName)
 		if plan == nil {
-			e.logger.Error("cannot resume: plan no longer exists in config",
+			// The plan was renamed or removed while the daemon was down.
+			// The sequence cannot be resumed, but it must not be left in
+			// place: its client locks would be held forever, and because
+			// acquisition is re-entrant only for the holding sequence, no
+			// future sequence could ever act on those clients again.
+			reason := "plan " + seq.PlanName + " is no longer in the configuration"
+			e.logger.Error("cannot resume a sequence whose plan has gone; "+
+				"marking it failed and releasing its client locks",
 				"sequence", seq.ID, "plan", seq.PlanName)
+
+			if err := e.db.FailOrphanedSequence(e.ctx, seq.ID, reason); err != nil {
+				e.logger.Error("releasing the orphaned sequence", "sequence", seq.ID, "error", err)
+			}
 			return nil
 		}
 
@@ -359,6 +465,11 @@ func (e *Executor) probeAllClients() {
 		}
 
 		current := e.GetClientState(c.Name)
+
+		// While a sequence is driving this client, only the transitions it
+		// is waiting for count. A host mid-shutdown that still answers is
+		// not "up" — it is on its way down, and saying otherwise would
+		// unwind the state the sequence is tracking.
 		if current == StateShuttingDown || current == StateWaking {
 			if probeState == StateUp && current == StateWaking {
 				e.setClientState(c.Name, StateUp, nil)
@@ -368,7 +479,16 @@ func (e *Executor) probeAllClients() {
 			continue
 		}
 
-		if current == StateUnknown || current == StateDownUnverified {
+		// Otherwise the probe is the best information available, so record
+		// it. An earlier version only accepted a result when the recorded
+		// state was unknown or unverified, which meant a host that died
+		// out-of-band stayed "up" forever and one an engineer powered back
+		// on stayed "down" — the background probe could not track reality at
+		// all. Note that an inconclusive probe returns an error and never
+		// reaches here.
+		if probeState != current {
+			e.logger.Info("client state changed outside a sequence",
+				"client", c.Name, "from", current, "to", probeState)
 			e.setClientState(c.Name, probeState, nil)
 		}
 	}
@@ -501,12 +621,29 @@ func (e *Executor) evaluatePolicies() {
 			break
 		}
 
-		result := e.evaluator.Evaluate(&plan.Trigger, now)
-		if result == facts.True {
-			e.logger.Info("plan triggered", "plan", plan.Name)
-			e.emit(Event{Type: "trigger", Timestamp: now, Data: plan.Name})
-			go e.executeSequence(plan)
+		if e.evaluator.Evaluate(&plan.Trigger, now) != facts.True {
+			continue
 		}
+
+		// Claim the slot here, synchronously, before starting the goroutine.
+		//
+		// executeSequence used to claim it only after pinning every client's
+		// address, which performs DNS lookups with a five-second timeout
+		// each. During those seconds ActiveSequence() stayed nil, so every
+		// subsequent policy tick logged another trigger, emitted another
+		// event to every webhook, and spawned another goroutine racing on
+		// the same work. The compare-and-set inside executeSequence stopped
+		// them all but one from actually running, so nothing was shut down
+		// twice — but the duplicate notifications were real.
+		as := e.newSequenceFor(plan)
+		if !e.setActiveSequence(as) {
+			continue
+		}
+
+		e.logger.Info("plan triggered", "plan", plan.Name, "sequence", as.ID())
+		e.emit(Event{Type: "trigger", Timestamp: now, Data: plan.Name})
+
+		go e.executeSequence(as)
 	}
 }
 
