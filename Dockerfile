@@ -10,7 +10,7 @@
 # Node 24 is the current LTS. Dependabot proposed 26, which is still
 # "Current" -- a line that stops getting fixes the moment 28 ships. A build
 # toolchain is the last place to be on a release train that ends early.
-FROM --platform=$BUILDPLATFORM node:24.21-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:26.9-alpine AS frontend
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
