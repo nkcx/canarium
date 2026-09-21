@@ -55,6 +55,26 @@ func (r Reachability) String() string {
 //   - A timeout, a DNS failure, ENETUNREACH or a context cancellation
 //     establish nothing at all. Reporting these as "down" is how a network
 //     partition gets mistaken for a completed shutdown.
+//
+// A note on the case that looks like a false negative. A host that powers off
+// on a directly attached subnet does not send RST, and no router is in the
+// path to report it unreachable — so the first probes after shutdown hit the
+// still-cached ARP entry and time out, which lands here as Indeterminate.
+// Once the neighbour entry expires (tens of seconds on Linux), ARP
+// resolution fails and the kernel returns EHOSTUNREACH, which is positive
+// evidence and classifies as Unreachable.
+//
+// So verification does succeed for a cleanly powered-off LAN host — it just
+// takes longer than the first probe. This is why shutdown budgets are
+// measured in minutes and why the executor keeps probing across the whole
+// budget rather than deciding on one attempt. A budget shorter than the
+// neighbour-table timeout will end in down_unverified, which validation
+// warns about.
+//
+// The alternative — treating a timeout as "confirmed down" — would make a
+// network partition indistinguishable from a completed shutdown, which is
+// the failure this classification exists to prevent. Waiting longer is the
+// cheaper mistake.
 func ProbeTCP(ctx context.Context, addr string, timeout time.Duration) (Reachability, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second

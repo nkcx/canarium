@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type ValidationResult struct {
@@ -207,6 +208,7 @@ func validateClients(cfg *Config, result *ValidationResult, reg *Registry) {
 
 		checkDuration(result, c.ShutdownBudget,
 			fmt.Sprintf("client %q: shutdown_budget", c.Name))
+		warnIfBudgetTooShortToVerify(c, result)
 		checkDuration(result, c.GuardPeriod,
 			fmt.Sprintf("client %q: guard_period", c.Name))
 		if c.Probe != nil {
@@ -568,6 +570,34 @@ func validateConditionConfig(c *ConditionConfig, context string, result *Validat
 	if c.Fact != "" && reg != nil && len(reg.Facts) > 0 && !slices.Contains(reg.Facts, c.Fact) {
 		result.AddError("%s: unknown fact %q (did you mean one of: %s)",
 			context, c.Fact, strings.Join(nearestFacts(c.Fact, reg.Facts), ", "))
+	}
+}
+
+// minVerifiableBudget is the shortest shutdown budget from which a cleanly
+// powered-off host on a local subnet can usually be confirmed down.
+//
+// A machine that powers off sends no RST, and on a directly attached subnet
+// no router reports it unreachable — so probes time out inconclusively until
+// the kernel's neighbour entry expires and ARP resolution starts failing,
+// which then gives positive evidence. That takes tens of seconds. A budget
+// shorter than this will usually end in down_unverified even when the host
+// went down perfectly.
+const minVerifiableBudget = 90 * time.Second
+
+// warnIfBudgetTooShortToVerify flags a budget unlikely to allow verification.
+func warnIfBudgetTooShortToVerify(c ClientConfig, result *ValidationResult) {
+	budget, err := Duration(c.ShutdownBudget, DefaultShutdownBudget())
+	if err != nil || budget <= 0 {
+		return
+	}
+
+	if budget < minVerifiableBudget {
+		result.AddWarning("client %q: shutdown_budget is %s. A host that powers off "+
+			"cleanly on a local subnet usually cannot be confirmed down for "+
+			"roughly a minute, until the kernel stops caching its address — so "+
+			"this client will likely finish as down_unverified and wait out its "+
+			"guard period before being woken. Consider at least %s.",
+			c.Name, budget, minVerifiableBudget)
 	}
 }
 
