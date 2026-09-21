@@ -587,6 +587,17 @@ func (e *Executor) pruneJournal(retain time.Duration) {
 	// The window is deliberately generous: a tracker not seen for this long
 	// belongs to a condition that is no longer in the config, since a live
 	// one is touched on every policy tick.
+	// Exported journal files expire on the same schedule as the rows they
+	// were derived from. An operator who wants a longer audit window copies
+	// them off the device; keeping them here forever would defeat the
+	// retention setting by leaving the same data on disk in another form.
+	filesPruned, err := e.db.PruneJournalFiles(time.Now().Add(-retain))
+	if err != nil {
+		e.logger.Error("pruning exported journal files", "error", err)
+	} else if filesPruned > 0 {
+		e.logger.Info("pruned exported journal files", "count", filesPruned)
+	}
+
 	dwellPruned, err := e.db.PruneDwellTrackers(e.ctx, time.Now().Add(-dwellRetention))
 	if err != nil {
 		e.logger.Error("pruning dwell trackers", "error", err)
@@ -595,7 +606,7 @@ func (e *Executor) pruneJournal(retain time.Duration) {
 			"count", dwellPruned)
 	}
 
-	if result.Total() == 0 && dwellPruned == 0 {
+	if result.Total() == 0 && dwellPruned == 0 && filesPruned == 0 {
 		return
 	}
 

@@ -20,6 +20,10 @@ import (
 type DB struct {
 	db *sql.DB
 
+	// dataDir is where the database lives. The audit journal writes its
+	// per-sequence files into a subdirectory of it.
+	dataDir string
+
 	// warnings holds non-fatal concerns found while opening, for the caller
 	// to log. Returned rather than held in a package global so concurrent
 	// opens — which tests do routinely — cannot overwrite each other.
@@ -95,7 +99,8 @@ func Open(ctx context.Context, dataDir string) (*DB, error) {
 	}
 
 	return &DB{
-		db: db,
+		db:      db,
+		dataDir: dataDir,
 		// MkdirAll leaves an existing directory's permissions alone, so a
 		// data directory created by a deployment script or a bind mount may
 		// be readable beyond its owner. Tightening it silently could break a
@@ -219,6 +224,69 @@ func scanSequence(row *sql.Row) (*Sequence, error) {
 	}
 
 	return &seq, nil
+}
+
+// GetSequenceByID returns one sequence by ID, or nil if there is no such
+// sequence. Unlike GetActiveSequence it does not filter by state, because
+// the audit journal exports sequences precisely once they are finished.
+func (d *DB) GetSequenceByID(ctx context.Context, id string) (*Sequence, error) {
+	row := d.db.QueryRowContext(ctx, `
+		SELECT id, plan_name, state, current_stage, ponr_crossed, started_at,
+		       completed_at, config_snapshot, pre_sequence_state, resolved_addrs,
+		       aborted, post_shutdown_run
+		FROM sequences
+		WHERE id = ?
+	`, id)
+	return scanSequence(row)
+}
+
+// StageRecords returns a sequence's stage records in execution order.
+func (d *DB) StageRecords(ctx context.Context, sequenceID string) ([]*StageRecord, error) {
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT sequence_id, stage_index, stage_name, started_at, completed_at, clients
+		FROM stage_records
+		WHERE sequence_id = ?
+		ORDER BY stage_index
+	`, sequenceID)
+	if err != nil {
+		return nil, fmt.Errorf("reading stage records: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*StageRecord
+	for rows.Next() {
+		var (
+			rec         StageRecord
+			startedAt   string
+			completedAt *string
+			clients     *string
+		)
+		if err := rows.Scan(&rec.SequenceID, &rec.StageIndex, &rec.StageName,
+			&startedAt, &completedAt, &clients); err != nil {
+			return nil, fmt.Errorf("scanning stage record: %w", err)
+		}
+
+		rec.StartedAt, err = time.Parse(time.RFC3339Nano, startedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing stage start %q: %w", startedAt, err)
+		}
+		if completedAt != nil {
+			t, err := time.Parse(time.RFC3339Nano, *completedAt)
+			if err != nil {
+				return nil, fmt.Errorf("parsing stage completion %q: %w", *completedAt, err)
+			}
+			rec.CompletedAt = &t
+		}
+		if clients != nil && *clients != "" {
+			if err := json.Unmarshal([]byte(*clients), &rec.Clients); err != nil {
+				return nil, fmt.Errorf("decoding stage clients: %w", err)
+			}
+		}
+
+		records = append(records, &rec)
+	}
+
+	return records, rows.Err()
 }
 
 // LastSequence returns the most recently started sequence, or nil if none

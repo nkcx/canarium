@@ -782,12 +782,34 @@ func (e *Executor) completeSequence(as *ActiveSequence) {
 
 	as.MarkCompleted(finalState, time.Now())
 	e.saveSequence(as)
+	e.exportJournal(as)
 	e.releaseSequence(as)
 
 	e.emit(Event{Type: "sequence_completed", Timestamp: time.Now(),
 		Data: map[string]any{"plan": as.PlanName(), "state": finalState}})
 	e.logger.Info("sequence finished",
 		"sequence", as.ID(), "plan", as.PlanName(), "state", finalState)
+}
+
+// exportJournal writes the sequence's audit journal (SPEC §8.6).
+//
+// Rotated on completion: one JSONL file per sequence, derived from the
+// database rather than replacing it. The database is the authority, but it
+// is pruned on a retention schedule and is not something an operator can
+// hand to someone investigating an outage. The journal is.
+//
+// A failure here is logged and otherwise ignored. The sequence has already
+// finished and the record survives in the database; refusing to release the
+// client locks because a file could not be written would turn a full disk
+// into a stuck installation.
+func (e *Executor) exportJournal(as *ActiveSequence) {
+	path, err := e.db.ExportJournal(e.ctx, as.ID())
+	if err != nil {
+		e.logger.Error("exporting the audit journal",
+			"sequence", as.ID(), "error", err)
+		return
+	}
+	e.logger.Info("audit journal written", "sequence", as.ID(), "path", path)
 }
 
 // releaseSequence drops the sequence's client locks and clears it as active.
