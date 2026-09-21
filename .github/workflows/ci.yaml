@@ -25,9 +25,9 @@ jobs:
           go-version: "1.26.8"
           cache: true
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22.21"
+          node-version: "24.21"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -80,9 +80,20 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v9
         with:
-          # This is the linter's own version, not the action's. v2 is
-          # required: earlier releases are built against Go 1.24 and refuse
-          # to analyse a module targeting a newer language version.
+          # This is the linter's own version, not the action's.
+          #
+          # golangci-lint refuses to analyse a module whose targeted Go
+          # version is newer than the one it was itself built with, so the
+          # Go toolchain cannot move ahead of it. v2.13.2 is built against
+          # Go 1.26, which is why go.mod, the Dockerfile and the go-version
+          # above are all still on 1.26.8: bumping them to 1.27 produces
+          #
+          #   the Go language version (go1.26) used to build golangci-lint
+          #   is lower than the targeted Go version (1.27.0)
+          #
+          # and the lint job fails. Dependabot will keep offering the Go
+          # bump; it is only safe once a golangci-lint release built on the
+          # newer toolchain exists. Move both together, or neither.
           version: v2.13.2
 
   build-image:
@@ -92,6 +103,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Signing the provenance attestation below.
+      id-token: write
+      attestations: write
     env:
       # Publishing belongs to main and to release tags. Now that CI runs on
       # every branch, an unconditional push would have tagged whatever
@@ -154,12 +168,19 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and publish image
+        id: publish
         if: env.PUBLISH == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
+          # The container is how Canarium is distributed, so the supply
+          # chain evidence belongs on the image rather than on a pile of
+          # loose binaries nobody downloads. An SBOM lists what is inside
+          # it; the attestation below proves where it came from.
+          sbom: true
+          provenance: mode=max
           # meta.outputs.version is the release number on a tag build and
           # the branch name otherwise, so `canarium --version` reports
           # something a human recognises rather than a commit hash.
@@ -169,3 +190,15 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Signed proof that this exact image was built by this workflow, from
+      # this commit. `gh attestation verify` checks it, so someone pulling
+      # the image can establish it came from here rather than from whoever
+      # last had a registry token.
+      - name: Attest provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

@@ -10,10 +10,10 @@
     "postbuild": "node scripts/keep-embed-placeholder.mjs"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tailwindcss/vite": "^4.3.3",
-    "svelte": "^5.56.8",
+    "svelte": "^5.57.1",
     "tailwindcss": "^4.3.3",
-    "vite": "^8.2.0"
+    "vite": "^8.3.0"
   }
 }

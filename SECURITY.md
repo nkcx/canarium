@@ -69,6 +69,17 @@ startup rather than changing it.
 
 **The container runs as a non-root user** (uid 65532) with no capabilities.
 
+**Images carry signed build provenance and an SBOM.** The container is how
+Canarium is distributed, so the supply-chain evidence lives on the image.
+Before trusting a pull, check it was built by this repository's workflow
+rather than by whoever last held a registry token:
+
+```bash
+gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.1 --repo nkcx/canarium
+docker buildx imagetools inspect ghcr.io/nkcx/canarium:0.1.1 \
+  --format '{{ json .SBOM }}'
+```
+
 ## Known limitations
 
 - Authentication is a single local admin. There is no federated auth and no
