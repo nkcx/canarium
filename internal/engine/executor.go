@@ -75,6 +75,11 @@ const (
 // runtime.
 const modeKey = "mode"
 
+// dwellRetention is how long a dwell tracker survives without being
+// evaluated. A condition still in the config is touched on every policy
+// tick, so anything untouched for a day belongs to one that has gone.
+const dwellRetention = 24 * time.Hour
+
 // DefaultTimings returns the production polling intervals.
 func DefaultTimings() Timings {
 	return Timings{
@@ -565,15 +570,33 @@ func (e *Executor) pruneJournal(retain time.Duration) {
 		return
 	}
 
-	if result.Total() == 0 {
+	// Dwell trackers are keyed by a hash of the condition, so every config
+	// edit that changes a condition orphans its tracker. PruneDwellTrackers
+	// existed and had no caller, so they accumulated for the life of the
+	// installation.
+	//
+	// The window is deliberately generous: a tracker not seen for this long
+	// belongs to a condition that is no longer in the config, since a live
+	// one is touched on every policy tick.
+	dwellPruned, err := e.db.PruneDwellTrackers(e.ctx, time.Now().Add(-dwellRetention))
+	if err != nil {
+		e.logger.Error("pruning dwell trackers", "error", err)
+	} else if dwellPruned > 0 {
+		e.logger.Info("pruned dwell trackers for conditions no longer in the config",
+			"count", dwellPruned)
+	}
+
+	if result.Total() == 0 && dwellPruned == 0 {
 		return
 	}
 
-	e.logger.Info("pruned journal records older than the retention window",
-		"retain", retain,
-		"sequences", result.Sequences,
-		"intents", result.Intents,
-		"stage_records", result.StageRecords)
+	if result.Total() > 0 {
+		e.logger.Info("pruned journal records older than the retention window",
+			"retain", retain,
+			"sequences", result.Sequences,
+			"intents", result.Intents,
+			"stage_records", result.StageRecords)
+	}
 
 	// SQLite does not return freed pages to the filesystem on its own.
 	if err := e.db.Vacuum(e.ctx); err != nil {

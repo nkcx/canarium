@@ -337,12 +337,29 @@ func (t *Transport) hostKeyCallback(client *engine.Client) (gossh.HostKeyCallbac
 		var keyErr *knownhosts.KeyError
 		if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
 			// Unknown host: learn it.
+			//
+			// Re-check under the lock before writing. A stage shuts its
+			// clients down concurrently, and each goroutine holds its own
+			// snapshot of known_hosts taken before any of them wrote — so
+			// two clients reaching the same host, or the same client
+			// probed and shut down at once, would each conclude the key was
+			// unknown and append it.
+			t.mu.Lock()
+			defer t.mu.Unlock()
+
+			if fresh, freshErr := knownhosts.New(path); freshErr == nil {
+				if fresh(hostname, remote, key) == nil {
+					// Another goroutine learned it while we waited.
+					return nil
+				}
+			}
+
 			t.logger.Warn("learning a new SSH host key on first contact; "+
 				"verify the fingerprint out of band if this host matters",
 				"client", client.Name,
 				"host", hostname,
 				"fingerprint", gossh.FingerprintSHA256(key))
-			return t.appendKnownHost(path, hostname, remote, key)
+			return t.appendKnownHostLocked(path, hostname, remote, key)
 		}
 
 		// Known host with a different key: refuse. This is either a
@@ -355,10 +372,8 @@ func (t *Transport) hostKeyCallback(client *engine.Client) (gossh.HostKeyCallbac
 	}, nil
 }
 
-func (t *Transport) appendKnownHost(path, hostname string, remote net.Addr, key gossh.PublicKey) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
+// appendKnownHostLocked records a host key. The caller must hold t.mu.
+func (t *Transport) appendKnownHostLocked(path, hostname string, remote net.Addr, key gossh.PublicKey) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening known_hosts for append: %w", err)

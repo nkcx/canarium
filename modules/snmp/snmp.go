@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
@@ -205,6 +206,9 @@ func RegisterFacts(store *facts.Store, cfg Config, logger *slog.Logger) {
 // to enable or disable PoE on managed switch ports.
 type PoeTransport struct {
 	logger *slog.Logger
+
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
 func NewPoeTransport(logger *slog.Logger) *PoeTransport {
@@ -241,19 +245,66 @@ func (t *PoeTransport) Execute(ctx context.Context, client *engine.Client, actio
 	}
 }
 
+// switchAddress returns the management address of the switch whose PoE ports
+// control this client.
+//
+// This is deliberately distinct from client.Address. Both used to come from
+// the same field, which could not be right for both purposes at once: set it
+// to the switch and Probe checks the switch — which is always up, so a
+// de-powered camera reported as up forever. Set it to the camera and the
+// SNMP SET goes to a device that does not manage the switch's ports.
+//
+// switch_address in transport_config is the switch; client.Address is the
+// device being powered. Falling back to client.Address keeps existing
+// configurations working, with a warning, since that is what the guide used
+// to tell people to write.
+func (t *PoeTransport) switchAddress(client *engine.Client) string {
+	if addr := getConfigString(client.TransportConfig, "switch_address"); addr != "" {
+		return addr
+	}
+
+	if client.Address != "" {
+		t.warnOnce(client.Name, func() {
+			t.logger.Warn("snmp-poe: no switch_address configured, falling back to the "+
+				"client address. Set switch_address to the switch's management IP and "+
+				"address to the device being powered, so its state can be verified.",
+				"client", client.Name, "address", client.Address)
+		})
+	}
+	return client.Address
+}
+
+// warnOnce emits a per-client warning a single time, so a misconfiguration
+// does not fill the log on every poll.
+func (t *PoeTransport) warnOnce(key string, warn func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.warned == nil {
+		t.warned = make(map[string]bool)
+	}
+	if t.warned[key] {
+		return
+	}
+	t.warned[key] = true
+	warn()
+}
+
 // Probe reports whether a PoE-powered client is up.
 //
-// The previous implementation dialled UDP against the *switch's* SNMP port
-// and reported success as "up". net.Dial on UDP sends no packet — it only
-// binds a local socket — so it succeeded for any resolvable address and this
-// transport reported every client as up, unconditionally and forever. A
-// PoE-controlled host was therefore never verified down during a shutdown,
-// and was reported awake the instant it was told to wake.
+// The original implementation dialled UDP against the switch's SNMP port and
+// reported success as "up". net.Dial on UDP sends no packet — it only binds a
+// local socket — so it succeeded for any resolvable address and reported
+// every client as up, unconditionally and forever.
 //
 // Probing a client means probing the client, so this makes a TCP connection
-// to the host itself. Set probe.port to a port the host actually listens on;
-// 22 is the default because a PoE device that can be shut down gracefully
-// almost certainly runs SSH.
+// to the device itself. Set probe.port to a port the device listens on; 22 is
+// the default because a PoE device that can be shut down gracefully almost
+// certainly runs SSH.
+//
+// When switch_address is set, client.Address is unambiguously the device. If
+// it is not, this probe is checking whatever client.Address points at, which
+// may be the switch — hence the warning in switchAddress.
 func (t *PoeTransport) Probe(ctx context.Context, client *engine.Client) (engine.ClientState, error) {
 	if client.Address == "" {
 		return engine.StateUnknown, fmt.Errorf(
@@ -297,13 +348,18 @@ func (t *PoeTransport) setPoeState(ctx context.Context, client *engine.Client, e
 		snmpPort = p
 	}
 
-	snmpClient, err := newGoSNMP(client.Address, snmpPort, version, community, user, authPass, privPass)
+	switchAddr := t.switchAddress(client)
+	if switchAddr == "" {
+		return nil, fmt.Errorf("snmp-poe: no switch_address configured for client %s", client.Name)
+	}
+
+	snmpClient, err := newGoSNMP(switchAddr, snmpPort, version, community, user, authPass, privPass)
 	if err != nil {
 		return nil, fmt.Errorf("snmp-poe: %w", err)
 	}
 
 	if err := snmpClient.Connect(); err != nil {
-		return nil, fmt.Errorf("snmp-poe: connecting to %s: %w", client.Address, err)
+		return nil, fmt.Errorf("snmp-poe: connecting to %s: %w", switchAddr, err)
 	}
 	defer snmpClient.Conn.Close()
 

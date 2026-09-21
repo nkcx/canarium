@@ -210,38 +210,51 @@ func (s *Source) pollLine(ctx context.Context, pin PinConfig, line *gpiocdev.Lin
 	ticker := time.NewTicker(pin.pollInterval())
 	defer ticker.Stop()
 
+	// Read once immediately, as the NUT and SNMP sources do. Waiting for the
+	// first tick left GPIO facts absent from the store for a whole poll
+	// interval after startup — up to a minute for a flood or door sensor —
+	// during which every condition reading them evaluated as unavailable.
+	s.readAndEmit(ctx, pin, line, updates)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			value, err := line.Value()
-			if err != nil {
-				s.logger.Error("GPIO read failed", "pin", pin.Name, "error", err)
-				continue
-			}
-
-			var fact any
-			switch pin.Type {
-			case "digital":
-				fact = value == 1
-			case "analog":
-				// Raw chardev lines return 0 or 1; true analog would need
-				// an ADC. Expose the integer value for forward compatibility.
-				fact = value
-			default:
-				fact = value == 1
-			}
-
-			select {
-			case updates <- engine.FactUpdate{
-				Key:       instanceName + "." + pin.Name,
-				Value:     fact,
-				Timestamp: time.Now(),
-			}:
-			case <-ctx.Done():
+			if !s.readAndEmit(ctx, pin, line, updates) {
 				return
 			}
 		}
+	}
+}
+
+// readAndEmit takes one reading and publishes it, reporting whether polling
+// should continue.
+func (s *Source) readAndEmit(ctx context.Context, pin PinConfig, line *gpiocdev.Line, updates chan<- engine.FactUpdate) bool {
+	value, err := line.Value()
+	if err != nil {
+		s.logger.Error("GPIO read failed", "pin", pin.Name, "error", err)
+		return true
+	}
+
+	var fact any
+	switch pin.Type {
+	case "analog":
+		// Raw chardev lines return 0 or 1; true analog would need an ADC.
+		// Expose the integer for forward compatibility.
+		fact = value
+	default:
+		fact = value == 1
+	}
+
+	select {
+	case updates <- engine.FactUpdate{
+		Key:       instanceName + "." + pin.Name,
+		Value:     fact,
+		Timestamp: time.Now(),
+	}:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }

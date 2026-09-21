@@ -35,6 +35,11 @@ type Registry struct {
 	// Transports is the set of registered transport names.
 	Transports []string
 
+	// Local identifies the host Canarium is running on, so validation can
+	// refuse a config that would have it shut itself down. Nil skips that
+	// check.
+	Local *LocalIdentity
+
 	// SourceTypes is the set of source types the daemon can construct.
 	SourceTypes []string
 
@@ -60,6 +65,10 @@ func ValidateWith(cfg *Config, reg *Registry) *ValidationResult {
 	validateSources(cfg, result, reg)
 	validatePlans(cfg, result, reg)
 	validateDependencies(cfg, result)
+
+	if reg != nil {
+		validateSelfPreservation(cfg, result, reg.Local)
+	}
 
 	return result
 }
@@ -123,9 +132,8 @@ func validateCanarium(cfg *Config, result *ValidationResult) {
 	}
 
 	if cfg.Canarium.JournalRetain != "" {
-		if d, err := ParseDuration(cfg.Canarium.JournalRetain); err != nil {
-			result.AddError("canarium.journal_retain: %s", err)
-		} else if d == 0 {
+		checkDuration(result, cfg.Canarium.JournalRetain, "canarium.journal_retain")
+		if d, err := ParseDuration(cfg.Canarium.JournalRetain); err == nil && d == 0 {
 			result.AddWarning("canarium.journal_retain is zero; " +
 				"sequence history will be kept indefinitely")
 		}
@@ -197,11 +205,13 @@ func validateClients(cfg *Config, result *ValidationResult, reg *Registry) {
 			}
 		}
 
-		if _, err := ParseDuration(c.ShutdownBudget); err != nil {
-			result.AddError("client %q: invalid shutdown_budget: %s", c.Name, err)
-		}
-		if _, err := ParseDuration(c.GuardPeriod); err != nil {
-			result.AddError("client %q: invalid guard_period: %s", c.Name, err)
+		checkDuration(result, c.ShutdownBudget,
+			fmt.Sprintf("client %q: shutdown_budget", c.Name))
+		checkDuration(result, c.GuardPeriod,
+			fmt.Sprintf("client %q: guard_period", c.Name))
+		if c.Probe != nil {
+			checkDuration(result, c.Probe.Timeout,
+				fmt.Sprintf("client %q: probe.timeout", c.Name))
 		}
 
 		switch c.FeedPolicy {
@@ -258,16 +268,10 @@ func validatePlans(cfg *Config, result *ValidationResult, reg *Registry) {
 
 			validateConditionConfig(&s.When, fmt.Sprintf("plan %q stage %q when", p.Name, s.Name), result, reg)
 
-			if s.Budget != "" {
-				if _, err := ParseDuration(s.Budget); err != nil {
-					result.AddError("plan %q stage %q: invalid budget: %s", p.Name, s.Name, err)
-				}
-			}
-			if s.WaitTimeout != "" {
-				if _, err := ParseDuration(s.WaitTimeout); err != nil {
-					result.AddError("plan %q stage %q: invalid wait_timeout: %s", p.Name, s.Name, err)
-				}
-			}
+			checkDuration(result, s.Budget,
+				fmt.Sprintf("plan %q stage %q: budget", p.Name, s.Name))
+			checkDuration(result, s.WaitTimeout,
+				fmt.Sprintf("plan %q stage %q: wait_timeout", p.Name, s.Name))
 
 			// An unrecognised policy previously fell through to skip, so a
 			// typo silently turned a stage that should hold into one that
@@ -307,6 +311,8 @@ func validatePlans(cfg *Config, result *ValidationResult, reg *Registry) {
 			result.AddInfo("plan %q: no PONR set — sequence is fully abortable", p.Name)
 		}
 
+		validatePostShutdown(p.Name, p.Shutdown.PostShutdown, result)
+
 		validateConditionConfig(&p.Wake.Gate, fmt.Sprintf("plan %q wake gate", p.Name), result, reg)
 
 		for i, s := range p.Wake.Stages {
@@ -333,12 +339,7 @@ func validatePlans(cfg *Config, result *ValidationResult, reg *Registry) {
 			"wake.probe_interval": p.Wake.ProbeInterval,
 			"wake.boot_deadline":  p.Wake.BootDeadline,
 		} {
-			if value == "" {
-				continue
-			}
-			if _, err := ParseDuration(value); err != nil {
-				result.AddError("plan %q: invalid %s: %s", p.Name, field, err)
-			}
+			checkDuration(result, value, fmt.Sprintf("plan %q: %s", p.Name, field))
 		}
 	}
 }
@@ -350,6 +351,61 @@ func waitTimeoutOrDefault(value string) string {
 		return value
 	}
 	return d.String()
+}
+
+// validatePostShutdown checks a plan's post-shutdown block.
+//
+// This was skipped entirely, so a misspelled command or a missing UPS name
+// passed validation and surfaced only at the very end of a real outage —
+// after every server was down, when nothing could be done about it.
+func validatePostShutdown(planName string, ps *PostShutdownConfig, result *ValidationResult) {
+	if ps == nil {
+		return
+	}
+
+	context := fmt.Sprintf("plan %q post_shutdown", planName)
+
+	switch strings.ToLower(strings.TrimSpace(ps.Action)) {
+	case "", "upscmd", "outlet_off", "load_off", "outlet_on", "load_on":
+	default:
+		result.AddError("%s: unrecognised action %q "+
+			"(expected upscmd, outlet_off or outlet_on)", context, ps.Action)
+	}
+
+	if strings.TrimSpace(ps.Command) == "" {
+		result.AddError("%s: no command configured. This is the NUT instant "+
+			"command to send, such as shutdown.return.", context)
+	}
+
+	if strings.TrimSpace(ps.UPS) == "" {
+		result.AddError("%s: no ups configured. This is the UPS name as it "+
+			"appears in ups.conf, not a hostname.", context)
+	}
+
+	if ps.Port < 0 || ps.Port > 65535 {
+		result.AddError("%s: port %d is out of range", context, ps.Port)
+	}
+
+	if ps.Delay < 0 {
+		result.AddError("%s: delay cannot be negative", context)
+	}
+
+	// Instant commands require authentication on any NUT server that is not
+	// wide open, which is the reason post_shutdown never worked before.
+	if (ps.Username == "") != (ps.Password == "") {
+		result.AddError("%s: username and password must be set together", context)
+	}
+	if ps.Username == "" && ps.Password == "" {
+		result.AddWarning("%s: no credentials configured. NUT requires "+
+			"authentication for instant commands, so this will be refused "+
+			"with ACCESS-DENIED unless upsd is configured to allow it "+
+			"unauthenticated.", context)
+	}
+
+	if strings.TrimSpace(ps.Host) == "" {
+		result.AddInfo("%s: no host configured; connecting to localhost. Set "+
+			"host if the NUT server runs elsewhere.", context)
+	}
 }
 
 func validateDependencies(cfg *Config, result *ValidationResult) {
@@ -512,6 +568,27 @@ func validateConditionConfig(c *ConditionConfig, context string, result *Validat
 	if c.Fact != "" && reg != nil && len(reg.Facts) > 0 && !slices.Contains(reg.Facts, c.Fact) {
 		result.AddError("%s: unknown fact %q (did you mean one of: %s)",
 			context, c.Fact, strings.Join(nearestFacts(c.Fact, reg.Facts), ", "))
+	}
+}
+
+// checkDuration validates a configured duration.
+//
+// time.ParseDuration accepts a negative value quite happily, and a negative
+// budget or timeout produces a context that has already expired — so a
+// shutdown gets no time at all and every host ends up down_unverified.
+func checkDuration(result *ValidationResult, value, context string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+
+	d, err := ParseDuration(value)
+	if err != nil {
+		result.AddError("%s: %s", context, err)
+		return
+	}
+	if d < 0 {
+		result.AddError("%s: %q is negative; a duration cannot run backwards",
+			context, value)
 	}
 }
 

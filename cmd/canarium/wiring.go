@@ -262,5 +262,6 @@ func buildRegistry(cfg *config.Config, store *facts.Store, logger *slog.Logger) 
 		Transports:  transportNames(cfg, logger),
 		SourceTypes: sourceTypes(),
 		Facts:       factKeys,
+		Local:       config.DetectLocalIdentity(),
 	}
 }

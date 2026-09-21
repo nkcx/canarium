@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -981,8 +982,21 @@ func (e *Executor) executePostShutdown(ps *config.PostShutdownConfig) {
 		},
 	}
 
-	if _, err := nutTransport.Execute(e.ctx, client, ActionOutletOff); err != nil {
-		e.logger.Error("post-shutdown action failed", "error", err)
+	// Honour the configured action. This was hardcoded to outlet_off, so a
+	// plan asking for anything else silently got a power cut instead.
+	action := ActionOutletOff
+	switch strings.ToLower(strings.TrimSpace(ps.Action)) {
+	case "", "upscmd", "outlet_off", "load_off":
+		action = ActionOutletOff
+	case "outlet_on", "load_on":
+		action = ActionOutletOn
+	default:
+		e.logger.Error("unrecognised post_shutdown action; treating it as outlet_off",
+			"action", ps.Action)
+	}
+
+	if _, err := nutTransport.Execute(e.ctx, client, action); err != nil {
+		e.logger.Error("post-shutdown action failed", "action", action, "error", err)
 	}
 }
 

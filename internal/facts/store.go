@@ -164,12 +164,30 @@ func (s *Store) FactQuality(key string) string {
 	return q.String()
 }
 
-func (s *Store) FactAge(key string) float64 {
+// FactAgeAt returns a fact's age in seconds as of the given instant, or -1
+// if it has never reported.
+//
+// The instant is supplied rather than read from the clock so that simulation
+// works. The simulator advances synthetic timestamps through a loop that
+// takes microseconds of real time, so an age measured with time.Since() was
+// always near zero there — making `age()` in a template condition useless in
+// exactly the tool meant to test it.
+func (s *Store) FactAgeAt(key string, now time.Time) float64 {
 	_, _, updatedAt := s.Get(key)
 	if updatedAt.IsZero() {
 		return -1
 	}
-	return time.Since(updatedAt).Seconds()
+
+	age := now.Sub(updatedAt).Seconds()
+	if age < 0 {
+		return 0
+	}
+	return age
+}
+
+// FactAge returns a fact's age in seconds as of now.
+func (s *Store) FactAge(key string) float64 {
+	return s.FactAgeAt(key, time.Now())
 }
 
 func sourceFromKey(key string) string {

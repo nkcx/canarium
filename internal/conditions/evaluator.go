@@ -76,7 +76,7 @@ func (e *Evaluator) evaluateInner(cond *config.ConditionConfig, now time.Time) f
 	case "not":
 		return e.evaluateNot(cond, now)
 	case "template":
-		return e.evaluateTemplate(cond)
+		return e.evaluateTemplate(cond, now)
 	case "true":
 		return facts.True
 	case "false":
@@ -201,13 +201,13 @@ func (e *Evaluator) evaluateNot(cond *config.ConditionConfig, now time.Time) fac
 	return facts.Not(e.Evaluate(&cond.Conditions[0], now))
 }
 
-func (e *Evaluator) evaluateTemplate(cond *config.ConditionConfig) facts.Trilean {
+func (e *Evaluator) evaluateTemplate(cond *config.ConditionConfig, now time.Time) facts.Trilean {
 	expression := cond.Value
 	if expression == "" {
 		return facts.Unavailable
 	}
 
-	result, sawUnavailable, err := e.evaluateExpr(expression)
+	result, sawUnavailable, err := e.evaluateExpr(expression, now)
 	if err != nil {
 		// A template that cannot be evaluated tells us nothing about the
 		// world; it must not read as a definite false.

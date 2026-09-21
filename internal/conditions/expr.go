@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -23,9 +24,9 @@ import (
 // quality() and age() deliberately do not set the flag: their entire purpose
 // is to inspect availability, so an expression like
 // `quality("ups.status") == "stale"` must still produce a definite answer.
-func (e *Evaluator) evaluateExpr(expression string) (result any, sawUnavailable bool, err error) {
+func (e *Evaluator) evaluateExpr(expression string, now time.Time) (result any, sawUnavailable bool, err error) {
 	var unavailable bool
-	env := e.buildExprEnv(&unavailable)
+	env := e.buildExprEnv(&unavailable, now)
 
 	program, err := e.compile(expression, env)
 	if err != nil {
@@ -70,7 +71,7 @@ func (e *Evaluator) compile(expression string, env map[string]any) (*vm.Program,
 // buildExprEnv constructs the function environment for one evaluation.
 //
 // unavailable is set if any fact() lookup finds an unknown or stale fact.
-func (e *Evaluator) buildExprEnv(unavailable *bool) map[string]any {
+func (e *Evaluator) buildExprEnv(unavailable *bool, now time.Time) map[string]any {
 	env := make(map[string]any)
 
 	env["fact"] = func(key string) any {
@@ -85,8 +86,10 @@ func (e *Evaluator) buildExprEnv(unavailable *bool) map[string]any {
 		return e.store.FactQuality(key)
 	}
 
+	// Measured against the evaluation instant, not the wall clock, so
+	// `age()` behaves the same in simulation as it does live.
 	env["age"] = func(key string) float64 {
-		return e.store.FactAge(key)
+		return e.store.FactAgeAt(key, now)
 	}
 
 	env["contains"] = func(set any, value string) bool {
