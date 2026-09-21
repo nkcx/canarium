@@ -1,229 +1,351 @@
 <script>
-  import { status, facts, clients, sequence, events } from '../lib/stores/api.js';
+  import {
+    status, facts, clients, events, loading, lastError, lastUpdated,
+  } from '../lib/stores/api.js';
+  import {
+    formatValue, unitSuffix, timeAgo, qualityTone, sortFacts, primaryPower,
+    splitFactKey,
+  } from '../lib/facts.js';
+  import { describeEvent, stateLabel, stateTone, stateNote } from '../lib/events.js';
+  import Section from '../lib/components/Section.svelte';
+  import Card from '../lib/components/Card.svelte';
+  import Chip from '../lib/components/Chip.svelte';
+  import StatusDot from '../lib/components/StatusDot.svelte';
 
-  function qualityDot(q) {
-    if (q === 'good') return 'bg-ok';
-    if (q === 'stale') return 'bg-warn';
-    return 'bg-ink-muted';
-  }
-
-  function stateColor(state) {
-    if (state === 'up') return 'bg-ok';
-    if (state === 'down') return 'bg-ink-muted';
-    if (state === 'failed') return 'bg-danger';
-    if (state === 'shutting_down' || state === 'waking' || state === 'down_unverified') {
-      return 'bg-warn';
-    }
-    return 'bg-ink-faint';
-  }
-
-  /**
-   * Renders a fact value for display.
-   *
-   * Integers are shown as integers: the previous version applied toFixed(1)
-   * to every number, so a runtime of 3600 seconds read as "3600.0".
-   */
-  function formatValue(fact) {
-    const val = fact?.value;
-    if (val === null || val === undefined) return '—';
-    if (Array.isArray(val)) return val.length ? val.join(' ') : '—';
-    if (typeof val === 'boolean') return val ? 'yes' : 'no';
-
-    if (typeof val === 'number') {
-      if (fact.type === 'duration') return formatSeconds(val);
-      if (fact.type === 'percent') return `${round(val)}%`;
-      return round(val);
-    }
-
-    return String(val);
-  }
-
-  function round(n) {
-    return Number.isInteger(n) ? String(n) : n.toFixed(1);
-  }
-
-  /** Renders a duration in seconds as something a human reads at a glance. */
-  function formatSeconds(seconds) {
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    const mins = Math.floor(seconds / 60);
-    if (mins < 60) return `${mins}m ${Math.round(seconds % 60)}s`;
-    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
-  }
-
-  /** A unit suffix, unless formatValue has already expressed it. */
-  function unitSuffix(fact) {
-    if (!fact?.unit) return '';
-    if (fact.type === 'percent' || fact.type === 'duration') return '';
-    return ` ${fact.unit}`;
-  }
-
-  // Sorted so the grid does not reshuffle on every refresh; Object.entries
-  // follows insertion order, which a Go map randomises per response.
-  $: sortedFacts = Object.entries($facts).sort(([a], [b]) => a.localeCompare(b));
-
+  $: seq = $status?.sequence ?? null;
+  $: power = primaryPower($facts);
+  $: sortedFacts = sortFacts($facts);
   $: staleFacts = sortedFacts.filter(([, f]) => f.quality !== 'good');
 
-  function timeAgo(ts) {
-    if (!ts) return '';
-    const d = new Date(ts);
-    const s = Math.floor((Date.now() - d.getTime()) / 1000);
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    return `${Math.floor(s / 3600)}h ago`;
+  /*
+   * The headline answers the only two questions worth asking at 2am: how
+   * long do I have, and what is happening. Both used to be buried in an
+   * alphabetically sorted grid of eight identically-weighted cards.
+   */
+  $: headline = seq
+    ? { tone: 'live', text: `${seq.plan} · ${stageText(seq)}` }
+    : power?.onBattery
+      ? { tone: 'warn', text: 'On battery — no plan has triggered' }
+      : { tone: 'ok', text: 'On mains power' };
+
+  function stageText(s) {
+    const n = (s.current_stage ?? 0) + 1;
+    const of = s.total_stages ?? '?';
+    return s.stage_name
+      ? `stage ${n} of ${of}: ${s.stage_name}`
+      : `stage ${n} of ${of}`;
+  }
+
+  const eventToneClass = {
+    live: 'text-amber',
+    ok: 'text-ok',
+    warn: 'text-warn',
+    danger: 'text-danger',
+    neutral: 'text-ink-secondary',
+  };
+
+  $: shownClients = [...$clients].sort(
+    (a, b) => clientRank(a.state) - clientRank(b.state) || a.name.localeCompare(b.name),
+  );
+
+  // Whatever still needs attention floats up: failures, then machines
+  // mid-transition, then the ones already settled.
+  function clientRank(state) {
+    if (state === 'failed') return 0;
+    if (state === 'shutting_down' || state === 'waking') return 1;
+    if (state === 'up') return 2;
+    return 3;
   }
 </script>
 
-<div class="p-6">
-  <!-- Header -->
-  <div class="flex items-center justify-between mb-6">
-    <h1 class="text-sm font-bold text-ink tracking-wider">DASHBOARD</h1>
-    {#if $status?.sequence}
-      <div class="flex items-center gap-2">
-        <span class="px-2 py-1 rounded text-[10px] font-bold bg-amber/20 text-amber animate-pulse">
-          {$status.sequence.state?.toUpperCase()}
-        </span>
-        {#if $status.sequence.stage_name}
-          <span class="text-[10px] text-ink-muted">
-            {$status.sequence.stage_name}
-            ({$status.sequence.current_stage + 1}/{$status.sequence.total_stages})
-          </span>
-        {/if}
-        {#if $status.sequence.ponr_crossed}
-          <span class="px-2 py-1 rounded text-[10px] font-bold bg-danger/20 text-danger">
-            PONR CROSSED
-          </span>
-        {/if}
+<h1 class="sr-only">Dashboard</h1>
+
+<!--
+  Failure and loading are distinct from "nothing configured". The empty
+  state used to render during the normal gap before the first fetch
+  returned, telling the operator to check a source configuration that was
+  fine.
+-->
+{#if $lastError}
+  <div class="mb-6">
+    <Card tone="danger">
+      <div class="flex items-start gap-3">
+        <StatusDot tone="danger" />
+        <div>
+          <div class="text-body text-danger font-bold">Lost contact with the daemon</div>
+          <p class="text-meta text-ink-secondary mt-1">
+            {$lastError}. The numbers below are the last ones received{#if $lastUpdated}, {timeAgo($lastUpdated)}{/if}
+            — they may no longer describe reality.
+          </p>
+        </div>
       </div>
+    </Card>
+  </div>
+{/if}
+
+<!-- ── The headline ───────────────────────────────────────────────── -->
+<section
+  class="mb-8 border rounded-[var(--radius-lg)] overflow-hidden
+    {seq ? 'border-amber/30 bg-amber/5' : 'border-edge bg-surface-50'}"
+  aria-label="Current status"
+>
+  <div class="p-5 sm:p-6">
+    <div class="flex items-center gap-2 flex-wrap mb-4">
+      <Chip tone={headline.tone}>{seq ? seq.state?.replace(/_/g, ' ') : 'idle'}</Chip>
+      {#if seq?.ponr_crossed}
+        <Chip tone="danger" title="This sequence can no longer be aborted">
+          PAST POINT OF NO RETURN
+        </Chip>
+      {/if}
+      <span class="text-body text-ink-secondary">{headline.text}</span>
+    </div>
+
+    {#if $loading && !power}
+      <div class="h-16 w-56 rounded bg-surface-200/60 animate-pulse" aria-hidden="true"></div>
+      <span class="sr-only">Loading current status…</span>
+    {:else if power}
+      <div class="flex flex-wrap items-end gap-x-10 gap-y-4">
+        <!-- The focal element. Nothing else on the page is this size. -->
+        <div>
+          <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1">
+            {power.onBattery ? 'RUNTIME REMAINING' : 'RUNTIME ON BATTERY'}
+          </div>
+          <div
+            class="text-hero leading-none font-bold tabular-nums
+              {power.runtime?.quality === 'good'
+                ? power.onBattery ? 'text-amber' : 'text-ink'
+                : 'text-ink-muted'}"
+          >
+            {power.runtime ? formatValue(power.runtime) : '—'}
+          </div>
+        </div>
+
+        <div>
+          <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1">
+            BATTERY
+          </div>
+          <div class="text-value leading-none font-bold tabular-nums text-ink">
+            {power.charge ? formatValue(power.charge) : '—'}
+          </div>
+        </div>
+
+        <div class="min-w-0">
+          <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1 truncate">
+            {power.source}
+          </div>
+          <div class="text-value leading-none font-bold text-ink-secondary">
+            {power.status ? formatValue(power.status) : '—'}
+          </div>
+        </div>
+      </div>
+
+      {#if power.degraded}
+        <p class="text-meta text-warn mt-4">
+          These readings are not current. Conditions that depend on them cannot
+          be satisfied, so the plan will not act on them.
+        </p>
+      {/if}
+    {:else}
+      <p class="text-body text-ink-muted">
+        No power source is reporting. Check your source configuration.
+      </p>
     {/if}
   </div>
 
-  <!-- Facts Grid -->
-  <section class="mb-6">
-    <div class="flex items-center gap-2 mb-3">
-      <h2 class="text-[10px] text-ink-muted tracking-wider">FACTS</h2>
-      {#if staleFacts.length > 0}
-        <span class="text-[10px] text-warn">
-          {staleFacts.length} not reporting — conditions reading them cannot be satisfied
+  {#if seq}
+    <div class="px-5 sm:px-6 py-3 border-t border-amber/20 bg-surface-0/30
+      flex flex-wrap items-center gap-x-6 gap-y-1 text-meta">
+      <span class="text-ink-muted">
+        Started <span class="text-ink-secondary">{timeAgo(seq.started_at)}</span>
+      </span>
+      <span class="text-ink-muted">
+        Abort
+        <span class={seq.abortable ? 'text-ok' : 'text-danger'}>
+          {seq.abortable ? 'still available' : 'no longer possible'}
         </span>
+      </span>
+      {#if seq.held_stage}
+        <span class="text-warn">Stage "{seq.held_stage}" is holding</span>
       {/if}
     </div>
-    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+  {/if}
+</section>
+
+<!-- ── Who is affected ────────────────────────────────────────────── -->
+<Section title="CLIENTS" id="clients-heading">
+  <span slot="aside" class="text-meta text-ink-muted">
+    {$clients.length} configured
+  </span>
+
+  {#if $loading && $clients.length === 0}
+    <div class="space-y-2" aria-hidden="true">
+      {#each [1, 2, 3] as i (i)}
+        <div class="h-12 rounded-[var(--radius-sm)] bg-surface-50 animate-pulse"></div>
+      {/each}
+    </div>
+  {:else if $clients.length === 0}
+    <Card>
+      <p class="text-body text-ink-muted text-center py-4">
+        No clients configured. Add them to your configuration file.
+      </p>
+    </Card>
+  {:else}
+    <!-- Cards on a phone, table on a desktop. The table used to render at
+         every width, so on 390px only the STATE column was reachable. -->
+    <div class="sm:hidden space-y-2">
+      {#each shownClients as client (client.name)}
+        <Card>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-body text-ink font-bold truncate">{client.name}</div>
+              <div class="text-meta text-ink-muted mt-0.5 truncate">
+                {client.transport} · {client.address || 'no address'}
+              </div>
+            </div>
+            <span class="flex items-center gap-1.5 shrink-0">
+              <StatusDot tone={stateTone(client.state)} />
+              <span class="text-meta text-ink-secondary">{stateLabel(client.state)}</span>
+            </span>
+          </div>
+          {#if stateNote(client.state)}
+            <p class="text-meta text-ink-muted mt-2">{stateNote(client.state)}</p>
+          {/if}
+        </Card>
+      {/each}
+    </div>
+
+    <div class="hidden sm:block border border-edge rounded-[var(--radius-md)] overflow-hidden">
+      <table class="w-full text-body">
+        <caption class="sr-only">Configured clients and their current state</caption>
+        <thead>
+          <tr class="bg-surface-100 text-ink-muted text-eyebrow tracking-[0.12em]">
+            <th scope="col" class="text-left px-4 py-2.5 font-bold">STATE</th>
+            <th scope="col" class="text-left px-4 py-2.5 font-bold">NAME</th>
+            <th scope="col" class="text-left px-4 py-2.5 font-bold">TRANSPORT</th>
+            <th scope="col" class="text-left px-4 py-2.5 font-bold">ADDRESS</th>
+            <th scope="col" class="text-left px-4 py-2.5 font-bold">TAGS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each shownClients as client (client.name)}
+            <tr class="border-t border-edge-subtle hover:bg-surface-50 transition-colors">
+              <td class="px-4 py-2.5">
+                <span class="inline-flex items-center gap-2">
+                  <StatusDot tone={stateTone(client.state)} />
+                  <span class="text-ink-secondary">{stateLabel(client.state)}</span>
+                </span>
+                {#if stateNote(client.state)}
+                  <span class="block text-meta text-ink-muted mt-0.5 max-w-xs">
+                    {stateNote(client.state)}
+                  </span>
+                {/if}
+              </td>
+              <td class="px-4 py-2.5 text-ink font-bold">{client.name}</td>
+              <td class="px-4 py-2.5 text-ink-secondary">{client.transport}</td>
+              <td class="px-4 py-2.5 text-ink-muted tabular-nums">{client.address || '—'}</td>
+              <td class="px-4 py-2.5">
+                <span class="flex flex-wrap gap-1">
+                  {#each (client.tags || []) as tag (tag)}
+                    <span class="px-1.5 py-0.5 bg-surface-200 text-ink-muted text-eyebrow rounded-[var(--radius-sm)]">
+                      {tag}
+                    </span>
+                  {/each}
+                </span>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</Section>
+
+<!-- ── Why ────────────────────────────────────────────────────────── -->
+<Section title="FACTS" id="facts-heading">
+  <span slot="aside" class="text-meta">
+    {#if staleFacts.length > 0}
+      <span class="text-warn">
+        {staleFacts.length} not reporting — conditions reading them cannot be satisfied
+      </span>
+    {:else}
+      <span class="text-ink-muted">all reporting</span>
+    {/if}
+  </span>
+
+  {#if $loading && sortedFacts.length === 0}
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-2" aria-hidden="true">
+      {#each [1, 2, 3, 4] as i (i)}
+        <div class="h-20 rounded-[var(--radius-sm)] bg-surface-50 animate-pulse"></div>
+      {/each}
+    </div>
+  {:else if sortedFacts.length === 0}
+    <Card>
+      <p class="text-body text-ink-muted text-center py-4">
+        No facts received. Check your source configuration.
+      </p>
+    </Card>
+  {:else}
+    <!-- Reference density, deliberately quieter than the headline: these
+         are the readings behind the number above, not a second focal point. -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
       {#each sortedFacts as [key, fact] (key)}
+        {@const parts = splitFactKey(key)}
         <div
-          class="border rounded-[var(--radius-sm)] p-3 bg-surface-50 transition-colors
+          class="border rounded-[var(--radius-sm)] px-3 py-2.5 bg-surface-50
             {fact.quality === 'good' ? 'border-edge' : 'border-warn/40'}"
           title={fact.description || key}
         >
-          <div class="text-[10px] text-ink-muted truncate mb-1">{key}</div>
-          <div class="text-lg font-bold tabular-nums
-            {fact.quality === 'good' ? 'text-ink' : 'text-ink-muted'}">
-            {formatValue(fact)}<span class="text-xs font-normal text-ink-muted">{unitSuffix(fact)}</span>
+          <div class="text-meta leading-tight" title={key}>
+            {#if parts.source}
+              <span class="text-ink-faint">{parts.source}</span>
+            {/if}
+            <span class="text-ink-muted block break-words">{parts.reading}</span>
           </div>
-          <div class="flex items-center gap-1.5 mt-1">
-            <span class="w-1 h-1 rounded-full {qualityDot(fact.quality)}"></span>
-            <span class="text-[9px] text-ink-muted">{fact.quality}</span>
+          <div
+            class="text-value font-bold tabular-nums mt-1 break-words
+              {fact.quality === 'good' ? 'text-ink' : 'text-ink-muted'}"
+          >
+            {formatValue(fact)}<span class="text-meta font-normal text-ink-muted"
+              >{unitSuffix(fact)}</span
+            >
+          </div>
+          <div class="flex items-center gap-1.5 mt-1.5">
+            <StatusDot tone={qualityTone(fact.quality)} />
+            <span class="text-meta text-ink-muted">{fact.quality}</span>
             {#if fact.updated_at}
-              <span class="text-[9px] text-ink-faint ml-auto">{timeAgo(fact.updated_at)}</span>
+              <span class="text-meta text-ink-faint ml-auto">{timeAgo(fact.updated_at)}</span>
             {/if}
           </div>
         </div>
       {/each}
-      {#if Object.keys($facts).length === 0}
-        <div class="col-span-full text-center py-8 text-ink-muted text-xs">
-          No facts received. Check source configuration.
-        </div>
-      {/if}
     </div>
-  </section>
-
-  <!-- Clients -->
-  <section class="mb-6">
-    <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">CLIENTS</h2>
-    <div class="border border-edge rounded-[var(--radius-sm)] overflow-hidden">
-      <table class="w-full text-xs">
-        <thead>
-          <tr class="bg-surface-100 text-ink-muted text-[10px] tracking-wider">
-            <th class="text-left px-3 py-2">STATE</th>
-            <th class="text-left px-3 py-2">NAME</th>
-            <th class="text-left px-3 py-2">TRANSPORT</th>
-            <th class="text-left px-3 py-2">ADDRESS</th>
-            <th class="text-left px-3 py-2">TAGS</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each $clients as client}
-            <tr class="border-t border-edge-subtle hover:bg-surface-50 transition-colors">
-              <td class="px-3 py-2">
-                <span class="inline-flex items-center gap-1.5">
-                  <span class="w-1.5 h-1.5 rounded-full {stateColor(client.state)}"></span>
-                  <span class="text-ink-secondary">{client.state}</span>
-                </span>
-              </td>
-              <td class="px-3 py-2 text-ink font-medium">{client.name}</td>
-              <td class="px-3 py-2 text-ink-secondary">{client.transport}</td>
-              <td class="px-3 py-2 text-ink-muted tabular-nums">{client.address || '—'}</td>
-              <td class="px-3 py-2">
-                {#each (client.tags || []) as tag}
-                  <span class="inline-block px-1.5 py-0.5 bg-surface-200 text-ink-muted text-[9px] rounded mr-1">
-                    {tag}
-                  </span>
-                {/each}
-              </td>
-            </tr>
-          {/each}
-          {#if $clients.length === 0}
-            <tr>
-              <td colspan="5" class="px-3 py-8 text-center text-ink-muted">
-                No clients configured.
-              </td>
-            </tr>
-          {/if}
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- Active Sequence -->
-  {#if $status?.sequence}
-    <section class="mb-6">
-      <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">ACTIVE SEQUENCE</h2>
-      <div class="border border-amber/30 rounded-[var(--radius-sm)] p-4 bg-amber/5">
-        <div class="flex items-center gap-3 mb-2">
-          <span class="text-amber font-bold text-sm">{$status.sequence.plan}</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber/20 text-amber">
-            {$status.sequence.state}
-          </span>
-          {#if $status.sequence.ponr_crossed}
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-danger/20 text-danger">
-              PONR
-            </span>
-          {/if}
-        </div>
-        <div class="text-[10px] text-ink-muted">
-          Stage {$status.sequence.current_stage} · Started {timeAgo($status.sequence.started_at)}
-        </div>
-      </div>
-    </section>
   {/if}
+</Section>
 
-  <!-- Event Log -->
-  <section>
-    <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">EVENT LOG</h2>
-    <div class="border border-edge rounded-[var(--radius-sm)] max-h-64 overflow-y-auto">
-      {#each $events as evt}
-        <div class="flex items-start gap-3 px-3 py-1.5 border-b border-edge-subtle text-[11px]">
-          <span class="text-ink-faint tabular-nums flex-shrink-0 w-16">
-            {new Date(evt.timestamp).toLocaleTimeString()}
-          </span>
-          <span class="text-amber flex-shrink-0 w-32">{evt.type}</span>
-          <span class="text-ink-secondary truncate">
-            {typeof evt.data === 'object' ? JSON.stringify(evt.data) : evt.data}
-          </span>
-        </div>
-      {/each}
-      {#if $events.length === 0}
-        <div class="px-3 py-6 text-center text-ink-muted text-xs">No events yet.</div>
-      {/if}
-    </div>
-  </section>
-</div>
+<!-- ── History ────────────────────────────────────────────────────── -->
+<Section title="EVENT LOG" id="events-heading">
+  <div class="border border-edge rounded-[var(--radius-md)] max-h-80 overflow-y-auto">
+    {#each $events as evt, i (evt.timestamp + '-' + i)}
+      {@const described = describeEvent(evt)}
+      <div
+        class="flex items-baseline gap-3 px-4 py-2 text-body
+          {i > 0 ? 'border-t border-edge-subtle' : ''}"
+      >
+        <time
+          class="text-meta text-ink-faint tabular-nums shrink-0"
+          datetime={evt.timestamp}
+        >
+          {new Date(evt.timestamp).toLocaleTimeString([], {
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          })}
+        </time>
+        <span class={eventToneClass[described.tone]}>{described.text}</span>
+      </div>
+    {/each}
+    {#if $events.length === 0}
+      <p class="px-4 py-6 text-center text-ink-muted text-body">
+        {$loading ? 'Connecting to the event stream…' : 'Nothing has happened yet.'}
+      </p>
+    {/if}
+  </div>
+</Section>

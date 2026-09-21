@@ -1,61 +1,90 @@
 <script>
   import {
-    status,
-    setMode,
-    abortSequence,
-    proceedStage,
-    changePassword,
-    minPasswordLength,
-    passwordPinned,
-    configReadonly,
+    status, clients, setMode, abortSequence, proceedStage, changePassword,
+    minPasswordLength, passwordPinned, configReadonly,
   } from '../lib/stores/api.js';
+  import { timeAgo } from '../lib/facts.js';
+  import Section from '../lib/components/Section.svelte';
+  import Card from '../lib/components/Card.svelte';
+  import Chip from '../lib/components/Chip.svelte';
+  import Button from '../lib/components/Button.svelte';
+  import Field from '../lib/components/Field.svelte';
+  import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
 
   let modeChanging = false;
   let aborting = false;
   let proceeding = false;
   let error = '';
 
+  // Which destructive action is awaiting confirmation, if any.
+  let pending = null;
+
   const modes = [
-    { id: 'disarmed', label: 'Disarmed', desc: 'Sources poll, conditions evaluate, nothing executes.' },
-    { id: 'dry-run', label: 'Dry Run', desc: 'Full sequences with timing, transports log instead of acting.' },
-    { id: 'armed', label: 'Armed', desc: 'Live execution. Plans will trigger and execute.' },
+    {
+      id: 'disarmed', label: 'Disarmed', tone: 'neutral',
+      desc: 'Sources poll, conditions evaluate, nothing executes.',
+    },
+    {
+      id: 'dry-run', label: 'Dry Run', tone: 'info',
+      desc: 'Full sequences with timing, transports log instead of acting.',
+    },
+    {
+      id: 'armed', label: 'Armed', tone: 'live',
+      desc: 'Live execution. Plans will trigger and execute.',
+    },
   ];
 
   $: sequence = $status?.sequence ?? null;
   $: abortable = sequence?.abortable ?? false;
   $: heldStage = sequence?.held_stage ?? '';
 
-  async function changeMode(mode) {
+  // Naming the machines is the whole point of asking. A native confirm()
+  // could only offer a sentence.
+  $: runningClients = $clients.filter(
+    c => c.state === 'up' || c.state === 'shutting_down',
+  );
+
+  function requestMode(mode) {
     if ($configReadonly) {
       error =
         'config_readonly is set; change canarium.mode in the configuration file and restart.';
       return;
     }
+    error = '';
 
+    // Only arming is consequential enough to interrupt for.
     if (mode === 'armed' && $status?.mode !== 'armed') {
-      const ok = confirm(
-        'Arm Canarium?\n\n' +
-        'Plans will trigger on their conditions and shut down real machines.',
-      );
-      if (!ok) return;
+      pending = 'arm';
+      return;
     }
+    applyMode(mode);
+  }
 
+  async function applyMode(mode) {
     modeChanging = true;
     error = '';
     const result = await setMode(mode);
     if (!result.ok) error = result.error;
     modeChanging = false;
+    pending = null;
   }
 
-  async function handleAbort() {
-    const plan = sequence?.plan ?? 'the active sequence';
-    if (!confirm(`Abort ${plan}?\n\nIn-flight shutdowns will be allowed to finish.`)) return;
-
+  async function confirmAbort() {
     aborting = true;
     error = '';
     const result = await abortSequence();
     if (!result.ok) error = result.error;
     aborting = false;
+    pending = null;
+  }
+
+  async function confirmProceed() {
+    proceeding = true;
+    error = '';
+    const result = await proceedStage();
+    if (!result.ok) error = result.error;
+    proceeding = false;
+    pending = null;
   }
 
   let currentPassword = '';
@@ -89,215 +118,258 @@
     // On success every session is invalidated, including this one, so the
     // app returns to the login screen on its own.
   }
-
-  async function handleProceed() {
-    const ok = confirm(
-      `Force stage "${heldStage}" to proceed?\n\n` +
-      'Its entry condition has not been met. These clients will be shut down now.',
-    );
-    if (!ok) return;
-
-    proceeding = true;
-    error = '';
-    const result = await proceedStage();
-    if (!result.ok) error = result.error;
-    proceeding = false;
-  }
 </script>
 
-<div class="p-6">
-  <h1 class="text-sm font-bold text-ink tracking-wider mb-6">SETTINGS</h1>
+<h1 class="sr-only">Settings</h1>
 
-  <!-- Mode -->
-  <section class="mb-8">
-    <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">MODE</h2>
+{#if error}
+  <div class="mb-6">
+    <Card tone="danger">
+      <p class="text-body text-danger">{error}</p>
+    </Card>
+  </div>
+{/if}
+
+<!-- ── Mode ───────────────────────────────────────────────────────── -->
+<Section title="MODE" id="mode-heading">
+  <span slot="aside" class="text-meta text-ink-muted">
     {#if $configReadonly}
-      <div class="text-[10px] text-ink-muted mb-2">
-        Read-only: the mode comes from the configuration file.
-      </div>
+      read-only — set in the configuration file
     {/if}
-    <div class="space-y-2">
-      {#each modes as mode (mode.id)}
-        <button
-          class="w-full text-left px-4 py-3 border rounded-[var(--radius-sm)] transition-colors
-            {$status?.mode === mode.id
-              ? 'border-amber bg-amber/5 text-ink'
-              : 'border-edge bg-surface-50 text-ink-secondary hover:border-edge-strong'}"
-          onclick={() => changeMode(mode.id)}
-          disabled={modeChanging || $configReadonly}
-          title={$configReadonly
-            ? 'config_readonly is set; the mode comes from the configuration file'
-            : mode.desc}
-        >
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-bold">{mode.label}</span>
-            {#if $status?.mode === mode.id}
-              <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber/20 text-amber">ACTIVE</span>
-            {/if}
-          </div>
-          <div class="text-[10px] text-ink-muted mt-0.5">{mode.desc}</div>
-        </button>
-      {/each}
-    </div>
-  </section>
+  </span>
 
-  <!-- Sequence Control -->
-  {#if sequence}
-    <section class="mb-8">
-      <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">SEQUENCE CONTROL</h2>
+  <!-- Constrained, like every other block. These cards used to stretch the
+       full 1640px of a wide monitor for a two-line label. -->
+  <div class="space-y-2 max-w-2xl">
+    {#each modes as mode (mode.id)}
+      {@const active = $status?.mode === mode.id}
+      <button
+        class="w-full text-left px-4 py-3 border rounded-[var(--radius-md)] transition-colors
+          {active
+            ? 'border-amber/50 bg-amber/5'
+            : 'border-edge bg-surface-50 hover:border-edge-strong'}
+          disabled:opacity-40 disabled:pointer-events-none"
+        onclick={() => requestMode(mode.id)}
+        disabled={modeChanging || $configReadonly}
+        aria-pressed={active}
+        title={$configReadonly
+          ? 'config_readonly is set; the mode comes from the configuration file'
+          : mode.desc}
+      >
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-body font-bold {active ? 'text-ink' : 'text-ink-secondary'}">
+            {mode.label}
+          </span>
+          {#if active}
+            <Chip tone={mode.tone}>ACTIVE</Chip>
+          {/if}
+        </div>
+        <div class="text-meta text-ink-muted mt-1">{mode.desc}</div>
+      </button>
+    {/each}
+  </div>
+</Section>
 
-      <div class="border border-edge rounded-[var(--radius-sm)] bg-surface-50 p-4 mb-3 space-y-1.5 text-xs">
-        <div class="flex justify-between">
-          <span class="text-ink-muted">Plan</span>
-          <span class="text-ink">{sequence.plan}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-ink-muted">State</span>
-          <span class="text-ink">{sequence.state}</span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-ink-muted">Stage</span>
-          <span class="text-ink">
+<!-- ── Sequence control ───────────────────────────────────────────── -->
+{#if sequence}
+  <Section title="SEQUENCE CONTROL" id="sequence-heading">
+    <div class="max-w-2xl space-y-3">
+      <Card tone={sequence.ponr_crossed ? 'danger' : 'live'}>
+        <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-body">
+          <dt class="text-ink-muted">Plan</dt>
+          <dd class="text-ink text-right">{sequence.plan}</dd>
+
+          <dt class="text-ink-muted">State</dt>
+          <dd class="text-ink text-right">{sequence.state?.replace(/_/g, ' ')}</dd>
+
+          <dt class="text-ink-muted">Stage</dt>
+          <dd class="text-ink text-right">
             {sequence.stage_name || '—'}
-            <span class="text-ink-faint">
-              ({sequence.current_stage + 1} of {sequence.total_stages})
+            <span class="text-ink-muted">
+              ({(sequence.current_stage ?? 0) + 1} of {sequence.total_stages})
             </span>
-          </span>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-ink-muted">Point of no return</span>
-          <span class={sequence.ponr_crossed ? 'text-danger' : 'text-ink-secondary'}>
+          </dd>
+
+          <dt class="text-ink-muted">Started</dt>
+          <dd class="text-ink-secondary text-right">{timeAgo(sequence.started_at)}</dd>
+
+          <dt class="text-ink-muted">Point of no return</dt>
+          <dd class="text-right {sequence.ponr_crossed ? 'text-danger' : 'text-ok'}">
             {sequence.ponr_crossed ? 'crossed' : 'not crossed'}
-          </span>
-        </div>
-      </div>
+          </dd>
+        </dl>
+      </Card>
 
       {#if heldStage}
-        <div class="border border-warn/40 bg-warn/5 rounded-[var(--radius-sm)] p-3 mb-3">
-          <div class="text-warn text-xs font-bold">Stage "{heldStage}" is holding</div>
-          <div class="text-ink-muted text-[10px] mt-1">
-            Its entry condition has not been met and its wait policy is
-            <span class="font-mono">hold</span>. It will wait until the condition
-            holds, you force it through, or the sequence is aborted.
+        <Card tone="warn">
+          <div class="text-body font-bold text-warn">
+            Stage "{heldStage}" is holding
           </div>
-          <button
-            class="mt-2 px-3 py-1.5 border border-warn/50 text-warn text-[11px]
-              rounded-[var(--radius-sm)] hover:bg-warn/10 transition-colors disabled:opacity-40"
-            onclick={handleProceed}
-            disabled={proceeding}
-          >
-            {proceeding ? 'Forcing...' : 'Force stage to proceed'}
-          </button>
-        </div>
+          <p class="text-meta text-ink-secondary mt-1.5">
+            Its entry condition has not been met and its wait policy is
+            <span class="text-ink">hold</span>. It will wait until the condition
+            holds, you force it through, or the sequence is aborted.
+          </p>
+          <div class="mt-3">
+            <Button variant="danger" on:click={() => (pending = 'proceed')} disabled={proceeding}>
+              Force stage to proceed
+            </Button>
+          </div>
+        </Card>
       {/if}
 
-      <button
-        class="px-4 py-2 border border-danger/50 text-danger text-xs rounded-[var(--radius-sm)]
-          hover:bg-danger/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        onclick={handleAbort}
-        disabled={aborting || !abortable}
-        title={abortable
-          ? 'Stop the sequence and hand over to the wake plan'
-          : 'The point of no return has been crossed; this sequence can no longer be aborted'}
-      >
-        {aborting ? 'Aborting...' : 'Abort Sequence'}
-      </button>
-
-      {#if !abortable}
-        <div class="text-ink-muted text-[10px] mt-1.5">
-          Past the point of no return — the sequence will complete and hand over
-          to the wake plan.
-        </div>
-      {/if}
-    </section>
-  {/if}
-
-  {#if error}
-    <div class="mb-6 border border-danger/40 bg-danger/5 rounded-[var(--radius-sm)] p-3
-      text-danger text-xs">
-      {error}
+      <div>
+        <Button
+          variant={abortable ? 'danger' : 'default'}
+          size="lg"
+          on:click={() => (pending = 'abort')}
+          disabled={aborting || !abortable}
+          title={abortable
+            ? 'Stop the sequence and hand over to the wake plan'
+            : 'The point of no return has been crossed; this sequence can no longer be aborted'}
+        >
+          Abort sequence
+        </Button>
+        <p class="text-meta text-ink-muted mt-2">
+          {#if abortable}
+            In-flight shutdowns are allowed to finish, then the wake plan takes over.
+          {:else}
+            Past the point of no return — the sequence will complete and hand over
+            to the wake plan.
+          {/if}
+        </p>
+      </div>
     </div>
-  {/if}
+  </Section>
+{/if}
 
-  <!-- Admin password -->
-  {#if !$passwordPinned}
-    <section class="mb-8">
-      <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">ADMIN PASSWORD</h2>
-      <div class="border border-edge rounded-[var(--radius-sm)] bg-surface-50 p-4 max-w-sm">
-        <div class="text-[10px] text-ink-muted mb-3">
+<!-- ── Admin password ─────────────────────────────────────────────── -->
+{#if !$passwordPinned}
+  <Section title="ADMIN PASSWORD" id="password-heading">
+    <div class="max-w-md">
+      <Card>
+        <p class="text-meta text-ink-muted mb-4">
           Changing this signs out every session, including this one.
-        </div>
+        </p>
 
         <form onsubmit={e => { e.preventDefault(); handlePasswordChange(); }}>
-          <input
+          <Field
+            id="current-password"
+            label="CURRENT PASSWORD"
             type="password"
             bind:value={currentPassword}
-            class="w-full px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
-              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
-            placeholder="Current password"
             autocomplete="current-password"
           />
-          <input
+          <Field
+            id="new-password"
+            label="NEW PASSWORD"
             type="password"
             bind:value={newPassword}
-            class="w-full mt-2 px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
-              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
-            placeholder={`New password (at least ${$minPasswordLength} characters)`}
             autocomplete="new-password"
+            invalid={passwordTooShort}
+            hint={`At least ${$minPasswordLength} characters.`}
           />
-          <input
+          <Field
+            id="confirm-password"
+            label="CONFIRM NEW PASSWORD"
             type="password"
             bind:value={confirmPassword}
-            class="w-full mt-2 px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
-              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
-            placeholder="Confirm new password"
             autocomplete="new-password"
+            invalid={passwordMismatch}
           />
 
-          {#if passwordTooShort}
-            <div class="text-warn text-[10px] mt-1.5">
-              Must be at least {$minPasswordLength} characters.
-            </div>
-          {:else if passwordMismatch}
-            <div class="text-warn text-[10px] mt-1.5">Passwords do not match.</div>
-          {/if}
+          <div aria-live="polite">
+            {#if passwordTooShort}
+              <p class="text-meta text-warn mb-3">
+                Must be at least {$minPasswordLength} characters.
+              </p>
+            {:else if passwordMismatch}
+              <p class="text-meta text-warn mb-3">Passwords do not match.</p>
+            {/if}
 
-          {#if passwordError}
-            <div class="text-danger text-[10px] mt-1.5">{passwordError}</div>
-          {/if}
+            {#if passwordError}
+              <p class="text-meta text-danger mb-3">{passwordError}</p>
+            {/if}
+          </div>
 
-          <button
-            type="submit"
-            disabled={!canChangePassword}
-            class="w-full mt-3 px-3 py-2 bg-surface-100 border border-edge text-ink-secondary
-              text-xs rounded-[var(--radius-sm)] hover:border-edge-strong hover:text-ink
-              transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {changingPassword ? 'Changing...' : 'Change password'}
-          </button>
+          <Button type="submit" variant="primary" size="lg" full disabled={!canChangePassword}>
+            {changingPassword ? 'Changing…' : 'Change password'}
+          </Button>
         </form>
-      </div>
-    </section>
-  {/if}
-
-  <!-- Info -->
-  <section>
-    <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">SYSTEM</h2>
-    <div class="border border-edge rounded-[var(--radius-sm)] bg-surface-50 p-4 space-y-2 text-xs">
-      <div class="flex justify-between">
-        <span class="text-ink-muted">Config</span>
-        <span class="text-ink-secondary">File-canonical (YAML)</span>
-      </div>
-      <div class="flex justify-between">
-        <span class="text-ink-muted">Auth</span>
-        <span class="text-ink-secondary">
-          {$passwordPinned ? 'Local admin (set in config file)' : 'Local admin'}
-        </span>
-      </div>
-      <div class="flex justify-between">
-        <span class="text-ink-muted">Storage</span>
-        <span class="text-ink-secondary">SQLite WAL</span>
-      </div>
+      </Card>
     </div>
-  </section>
-</div>
+  </Section>
+{/if}
+
+<!-- ── System ─────────────────────────────────────────────────────── -->
+<Section title="SYSTEM" id="system-heading">
+  <div class="max-w-2xl">
+    <Card>
+      <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-body">
+        <dt class="text-ink-muted">Config</dt>
+        <dd class="text-ink-secondary text-right">File-canonical (YAML)</dd>
+
+        <dt class="text-ink-muted">Auth</dt>
+        <dd class="text-ink-secondary text-right">
+          {$passwordPinned ? 'Local admin (set in config file)' : 'Local admin'}
+        </dd>
+
+        <dt class="text-ink-muted">Storage</dt>
+        <dd class="text-ink-secondary text-right">SQLite WAL</dd>
+      </dl>
+    </Card>
+  </div>
+</Section>
+
+<!-- ── Confirmations ──────────────────────────────────────────────── -->
+<ConfirmDialog
+  open={pending === 'arm'}
+  title="Arm Canarium?"
+  confirmLabel="Arm"
+  confirmVariant="primary"
+  busy={modeChanging}
+  onconfirm={() => applyMode('armed')}
+  oncancel={() => (pending = null)}
+>
+  <p>
+    Plans will trigger on their conditions and shut down real machines,
+    without asking again.
+  </p>
+  {#if runningClients.length > 0}
+    <p class="text-ink-muted">
+      {runningClients.length}
+      {runningClients.length === 1 ? 'client is' : 'clients are'} currently
+      running and in scope:
+      <span class="text-ink">{runningClients.map(c => c.name).join(', ')}</span>.
+    </p>
+  {/if}
+</ConfirmDialog>
+
+<ConfirmDialog
+  open={pending === 'abort'}
+  title="Abort {sequence?.plan ?? 'the active sequence'}?"
+  confirmLabel="Abort sequence"
+  busy={aborting}
+  onconfirm={confirmAbort}
+  oncancel={() => (pending = null)}
+>
+  <p>
+    Machines already told to shut down will finish doing so — that cannot be
+    called back. Once they have settled, the wake plan takes over and brings
+    everything back up.
+  </p>
+</ConfirmDialog>
+
+<ConfirmDialog
+  open={pending === 'proceed'}
+  title="Force stage &quot;{heldStage}&quot; to proceed?"
+  confirmLabel="Shut them down now"
+  busy={proceeding}
+  onconfirm={confirmProceed}
+  oncancel={() => (pending = null)}
+>
+  <p>
+    This stage is holding because its entry condition has not been met.
+    Forcing it shuts its clients down now, regardless.
+  </p>
+</ConfirmDialog>

@@ -1,22 +1,24 @@
 <script>
   import { login, setup, needsSetup, minPasswordLength } from '../lib/stores/api.js';
+  import Button from '../lib/components/Button.svelte';
+  import Field from '../lib/components/Field.svelte';
 
   let password = '';
   let confirmPassword = '';
   let error = '';
-  let loading = false;
+  let busy = false;
 
   $: tooShort = $needsSetup && password.length > 0 && password.length < $minPasswordLength;
   $: mismatch = $needsSetup && confirmPassword.length > 0 && password !== confirmPassword;
   $: canSubmit =
-    !loading &&
+    !busy &&
     password.length > 0 &&
     (!$needsSetup || (password.length >= $minPasswordLength && password === confirmPassword));
 
   async function handleSubmit() {
     if (!canSubmit) return;
 
-    loading = true;
+    busy = true;
     error = '';
 
     const result = $needsSetup ? await setup(password) : await login(password);
@@ -26,68 +28,60 @@
       confirmPassword = '';
     }
 
-    loading = false;
+    busy = false;
   }
 </script>
 
-<div class="flex items-center justify-center h-screen bg-surface-0">
-  <div class="w-72">
+<div class="min-h-screen flex items-center justify-center bg-surface-0 px-4 py-10">
+  <div class="w-full max-w-xs">
     <div class="text-center mb-8">
-      <div class="text-amber font-bold text-lg tracking-wider">CANARIUM</div>
-      <div class="text-ink-muted text-[10px] mt-1">power orchestrator</div>
+      <div class="inline-flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-amber" aria-hidden="true"></span>
+        <span class="text-ink font-bold text-value tracking-[0.12em]">CANARIUM</span>
+      </div>
+      <div class="text-ink-muted text-meta mt-1.5">power orchestrator</div>
     </div>
 
     <form onsubmit={e => { e.preventDefault(); handleSubmit(); }}>
-      <div class="text-ink-muted text-[10px] tracking-wider mb-1.5">
-        {$needsSetup ? 'SET ADMIN PASSWORD' : 'PASSWORD'}
-      </div>
-      <input
+      <Field
+        id="password"
+        label={$needsSetup ? 'SET ADMIN PASSWORD' : 'PASSWORD'}
         type="password"
         bind:value={password}
-        class="w-full px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
-          text-ink text-xs focus:outline-none focus:border-amber
-          placeholder:text-ink-faint"
-        placeholder={$needsSetup ? `At least ${$minPasswordLength} characters` : 'Enter password'}
+        placeholder={$needsSetup ? `At least ${$minPasswordLength} characters` : ''}
         autocomplete={$needsSetup ? 'new-password' : 'current-password'}
+        invalid={tooShort}
       />
 
       {#if $needsSetup}
-        <input
+        <Field
+          id="confirm"
+          label="CONFIRM PASSWORD"
           type="password"
           bind:value={confirmPassword}
-          class="w-full mt-2 px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
-            text-ink text-xs focus:outline-none focus:border-amber
-            placeholder:text-ink-faint"
-          placeholder="Confirm password"
           autocomplete="new-password"
+          invalid={mismatch}
+          hint="This password protects the API that can shut down your infrastructure. There is no recovery path — store it somewhere safe."
         />
-        <div class="text-ink-faint text-[10px] mt-1.5">
-          This password protects the API that can shut down your infrastructure.
-          There is no recovery path — store it somewhere safe.
-        </div>
       {/if}
 
-      {#if tooShort}
-        <div class="text-warn text-[10px] mt-1.5">
-          Must be at least {$minPasswordLength} characters.
-        </div>
-      {:else if mismatch}
-        <div class="text-warn text-[10px] mt-1.5">Passwords do not match.</div>
-      {/if}
+      <div aria-live="polite">
+        {#if tooShort}
+          <p class="text-meta text-warn mb-3">
+            Must be at least {$minPasswordLength} characters.
+          </p>
+        {:else if mismatch}
+          <p class="text-meta text-warn mb-3">Passwords do not match.</p>
+        {/if}
 
-      {#if error}
-        <div class="text-danger text-[10px] mt-1.5">{error}</div>
-      {/if}
+        {#if error}
+          <p class="text-meta text-danger mb-3">{error}</p>
+        {/if}
+      </div>
 
-      <button
-        type="submit"
-        disabled={!canSubmit}
-        class="w-full mt-3 px-3 py-2 bg-amber/10 border border-amber/30 text-amber
-          text-xs rounded-[var(--radius-sm)] hover:bg-amber/20 transition-colors
-          disabled:opacity-40 disabled:cursor-not-allowed"
-      >
-        {loading ? '...' : $needsSetup ? 'Set Password' : 'Sign In'}
-      </button>
+      <Button type="submit" variant="primary" size="lg" full disabled={!canSubmit}>
+        {busy ? 'Signing in…' : $needsSetup ? 'Set password' : 'Sign in'}
+      </Button>
     </form>
   </div>
 </div>

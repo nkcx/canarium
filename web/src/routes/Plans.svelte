@@ -1,60 +1,83 @@
 <script>
-  import { plans, sequence } from '../lib/stores/api.js';
+  import { plans, sequence, loading } from '../lib/stores/api.js';
+  import Card from '../lib/components/Card.svelte';
+  import Chip from '../lib/components/Chip.svelte';
 
-  let selected = null;
+  let expanded = null;
+
+  function toggle(name) {
+    expanded = expanded === name ? null : name;
+  }
 </script>
 
-<div class="p-6">
-  <div class="flex items-center justify-between mb-6">
-    <h1 class="text-sm font-bold text-ink tracking-wider">PLANS</h1>
-    <span class="text-[10px] text-ink-muted">{$plans.length} configured</span>
-  </div>
+<div class="flex items-center justify-between gap-3 mb-6">
+  <h1 class="text-label font-bold text-ink">Plans</h1>
+  <span class="text-meta text-ink-muted">{$plans.length} configured</span>
+</div>
 
-  <div class="space-y-3">
-    {#each $plans as plan}
-      <div class="border border-edge rounded-[var(--radius-sm)] bg-surface-50">
+{#if $loading && $plans.length === 0}
+  <div class="space-y-2" aria-hidden="true">
+    {#each [1, 2] as i (i)}
+      <div class="h-14 rounded-[var(--radius-sm)] bg-surface-50 animate-pulse"></div>
+    {/each}
+  </div>
+{:else if $plans.length === 0}
+  <Card>
+    <p class="text-body text-ink-muted text-center py-6">
+      No plans configured. Add plans to your configuration file.
+    </p>
+  </Card>
+{:else}
+  <div class="space-y-2 max-w-3xl">
+    {#each $plans as plan (plan.name)}
+      {@const active = $sequence?.plan === plan.name}
+      <div
+        class="border rounded-[var(--radius-md)] overflow-hidden
+          {active ? 'border-amber/30 bg-amber/5' : 'border-edge bg-surface-50'}"
+      >
         <button
-          class="w-full text-left px-4 py-3 flex items-center justify-between"
-          onclick={() => selected = selected === plan.name ? null : plan.name}
+          class="w-full text-left px-4 py-3 min-h-14 flex items-center justify-between gap-3
+            hover:bg-surface-100/50 transition-colors"
+          aria-expanded={expanded === plan.name}
+          onclick={() => toggle(plan.name)}
         >
-          <div class="flex items-center gap-3">
-            <span class="text-xs font-bold text-ink">{plan.name}</span>
-            <span class="text-[10px] text-ink-muted">{plan.stages} stages</span>
-            {#if $sequence?.plan === plan.name}
-              <span class="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber/20 text-amber animate-pulse">
-                ACTIVE
-              </span>
+          <span class="flex items-center gap-3 flex-wrap min-w-0">
+            <span class="text-body font-bold text-ink truncate">{plan.name}</span>
+            <span class="text-meta text-ink-muted">{plan.stages} stages</span>
+            {#if active}
+              <!-- Three breaths on arrival, then still. The old badge pulsed
+                   for the whole sequence, which can be forty minutes. -->
+              <span class="animate-breathe"><Chip tone="live">RUNNING</Chip></span>
             {/if}
-          </div>
-          <span class="text-ink-faint text-xs">{selected === plan.name ? '▾' : '▸'}</span>
+          </span>
+          <span class="text-ink-faint text-body shrink-0" aria-hidden="true">
+            {expanded === plan.name ? '▾' : '▸'}
+          </span>
         </button>
 
-        {#if selected === plan.name}
-          <div class="px-4 pb-4 pt-2 border-t border-edge-subtle">
-            <div class="text-[10px] text-ink-muted mb-3">
-              Plan details are read from the configuration file. Edit the YAML to modify plans.
-            </div>
-
-            {#if $sequence?.plan === plan.name}
-              <div class="border border-amber/30 rounded-[var(--radius-sm)] p-3 bg-amber/5">
-                <div class="text-[10px] text-ink-muted tracking-wider mb-1">ACTIVE SEQUENCE</div>
-                <div class="text-xs text-ink">
-                  State: <span class="text-amber">{$sequence.state}</span>
-                  · Stage: {$sequence.current_stage}
-                  {#if $sequence.ponr_crossed}
-                    · <span class="text-danger">PONR crossed</span>
-                  {/if}
-                </div>
-              </div>
+        {#if expanded === plan.name}
+          <div class="px-4 pb-4 pt-3 border-t border-edge-subtle">
+            {#if active}
+              <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-body mb-3">
+                <dt class="text-ink-muted">State</dt>
+                <dd class="text-amber text-right">{$sequence.state?.replace(/_/g, ' ')}</dd>
+                <dt class="text-ink-muted">Stage</dt>
+                <dd class="text-ink text-right">
+                  {($sequence.current_stage ?? 0) + 1} of {$sequence.total_stages ?? '?'}
+                </dd>
+                <dt class="text-ink-muted">Point of no return</dt>
+                <dd class="text-right {$sequence.ponr_crossed ? 'text-danger' : 'text-ok'}">
+                  {$sequence.ponr_crossed ? 'crossed' : 'not crossed'}
+                </dd>
+              </dl>
             {/if}
+            <p class="text-meta text-ink-muted">
+              Plan details are read from the configuration file. Edit the YAML to
+              modify plans.
+            </p>
           </div>
         {/if}
       </div>
     {/each}
-    {#if $plans.length === 0}
-      <div class="text-center py-12 text-ink-muted text-xs">
-        No plans configured. Add plans to your configuration file.
-      </div>
-    {/if}
   </div>
-</div>
+{/if}

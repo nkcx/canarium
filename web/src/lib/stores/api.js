@@ -13,6 +13,29 @@ export const minPasswordLength = writable(12);
 export const passwordPinned = writable(false);
 export const configReadonly = writable(false);
 
+/**
+ * Whether the first snapshot is still in flight.
+ *
+ * Without this the dashboard rendered its empty state -- "No facts
+ * received. Check source configuration." -- during the perfectly normal
+ * gap before the first fetch returns. At 2am that reads as "your config is
+ * broken" when the truth is "still loading".
+ */
+export const loading = writable(true);
+
+/**
+ * The reason the last refresh failed, or null.
+ *
+ * Refresh errors were previously swallowed into console.error, so a daemon
+ * that had stopped answering looked identical to one reporting steady
+ * numbers -- the worst possible failure mode for a screen whose entire job
+ * is telling you what is happening right now.
+ */
+export const lastError = writable(null);
+
+/** When the last successful refresh landed, for staleness display. */
+export const lastUpdated = writable(null);
+
 const MAX_EVENTS = 100;
 
 /**
@@ -183,6 +206,9 @@ export async function logout() {
     plans.set([]);
     sequence.set(null);
     events.set([]);
+    lastError.set(null);
+    lastUpdated.set(null);
+    loading.set(true);
   }
 }
 
@@ -200,8 +226,17 @@ export async function refreshAll() {
     clients.set(c || []);
     plans.set(p || []);
     sequence.set(seq);
+    lastError.set(null);
+    lastUpdated.set(Date.now());
   } catch (e) {
     console.error('refresh failed:', e);
+    // A 401 is not a fault to report: the session simply ended, and the
+    // app is already on its way back to the login screen.
+    if (!(e instanceof ApiError && e.status === 401)) {
+      lastError.set(e.message ?? 'Could not reach the daemon');
+    }
+  } finally {
+    loading.set(false);
   }
 }
 

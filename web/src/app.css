@@ -1,12 +1,14 @@
 @import "tailwindcss";
 
 @theme {
+  /* Surfaces. One hue, lightness only, so the space never fragments. */
   --color-surface-0: #111214;
   --color-surface-50: #16181b;
   --color-surface-100: #1b1d21;
   --color-surface-200: #22252a;
   --color-surface-300: #2a2d33;
 
+  /* A four-step text ramp: primary, secondary, metadata, decoration. */
   --color-ink: #e8e6e3;
   --color-ink-secondary: #a09b94;
   --color-ink-muted: #6b665f;
@@ -16,6 +18,20 @@
   --color-edge-subtle: #242220;
   --color-edge-strong: #3d3a36;
 
+  /*
+   * Colour means one thing each, and only one.
+   *
+   *   amber   live: something is happening right now and you should look
+   *   ok      healthy: up, connected, recovered
+   *   warn    degraded: stale, unverified, holding
+   *   danger  irreversible or failed, and nothing else
+   *   info    inert commentary (dry-run)
+   *
+   * Amber previously did four jobs at once -- wordmark, sequence state,
+   * every event type in the log, and the active-sequence border -- so on a
+   * screen with six log rows it stopped meaning anything. It is now spent
+   * only where the operator should actually look.
+   */
   --color-amber: #d4a017;
   --color-amber-dim: #a67c14;
   --color-amber-glow: #f0b429;
@@ -31,23 +47,95 @@
 
   --font-mono: "Berkeley Mono", "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
 
+  /*
+   * A type scale, rather than six near-adjacent sizes.
+   *
+   * Steps are roughly 1.25x apart and every one has a job. The old set ran
+   * 9/10/11/12/14/18px -- four arbitrary values within 3px of each other,
+   * three of them under the 12px floor for sustained reading, on a console
+   * meant to be read on a phone in the dark.
+   *
+   * --text-eyebrow is the one sub-12px size that survives, because it is
+   * only ever used uppercase with wide tracking, where legibility comes
+   * from letterform spacing rather than height.
+   */
+  --text-eyebrow: 10px;
+  --text-meta: 12px;
+  --text-body: 13px;
+  --text-label: 16px;
+  --text-value: 20px;
+  --text-headline: 26px;
+  --text-hero: 40px;
+
   --radius-sm: 3px;
   --radius-md: 5px;
   --radius-lg: 8px;
+
+  /* The content column. Without one, a `justify-between` key/value row put
+     "Plan" and "outage" 1500px apart on a wide monitor. */
+  --width-content: 1200px;
 }
 
 body {
   background-color: var(--color-surface-0);
   color: var(--color-ink);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--text-body);
   line-height: 1.5;
   margin: 0;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
   box-sizing: border-box;
+}
+
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
+/*
+ * One focus treatment, applied everywhere, keyboard-only.
+ *
+ * The previous build set focus:outline-none on four text inputs and
+ * replaced it with a 1px border tint, and left every button -- including
+ * Abort Sequence and Force stage to proceed -- with no focus state at all.
+ */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-amber);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+:where(a, button, input, select, textarea, [tabindex]):focus:not(:focus-visible) {
+  outline: none;
+}
+
+/*
+ * Anything that animates does so briefly and on its own accord, and stops
+ * entirely for people who ask it to. The sequence-state chip used to pulse
+ * indefinitely for the length of a shutdown, which can be forty minutes.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Three breaths, then rest. Enough to catch the eye on state change
+   without becoming background noise for the rest of the outage. */
+.animate-breathe {
+  animation: breathe 1.6s ease-in-out 3;
 }
 
 ::-webkit-scrollbar {
@@ -62,4 +150,8 @@ body {
 ::-webkit-scrollbar-thumb {
   background: var(--color-edge-strong);
   border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-muted);
 }
