@@ -256,7 +256,7 @@ func (e *Executor) runShutdownStages(as *ActiveSequence) {
 		// A stage skipped by wait_policy never reaches this point, so
 		// skipping a PONR stage correctly leaves the sequence abortable.
 		if stage.PointOfNoReturn && as.CrossPonr() {
-			e.saveSequence(as)
+			e.saveSequenceDurable(as)
 			e.logger.Info("point of no return crossed", "stage", stage.Name, "sequence", as.ID())
 			e.emit(Event{Type: "ponr_crossed", Timestamp: time.Now(), Data: stage.Name})
 		}
@@ -529,7 +529,12 @@ func (e *Executor) shutdownClient(name string, as *ActiveSequence, budget time.D
 		Timestamp:  time.Now(),
 		Status:     state.IntentDispatching,
 	}
-	e.saveIntent(intent)
+	// Durable: this record is the only evidence that the command below was
+	// ever attempted, and the command's whole purpose is to make the
+	// machine stop. If it is still in an unflushed WAL when power goes, the
+	// restarted daemon sees no intent and cannot tell a host it already
+	// shut down from one it never reached.
+	e.saveIntentDurable(intent)
 
 	e.setClientState(name, StateShuttingDown, &seqID)
 
@@ -1109,6 +1114,17 @@ func (e *Executor) duration(value string, def time.Duration, field string, attrs
 
 func (e *Executor) saveIntent(intent *state.Intent) {
 	if err := e.db.SaveIntent(e.ctx, intent); err != nil {
+		e.logger.Error("persisting intent",
+			"client", intent.ClientName, "action", intent.Action, "error", err)
+	}
+}
+
+// saveIntentDurable persists an intent and waits for it to reach the disk.
+//
+// Used on the dispatch path, where the write has to survive the power cut
+// that the command it describes is about to cause. See state.Sync.
+func (e *Executor) saveIntentDurable(intent *state.Intent) {
+	if err := e.db.SaveIntentDurable(e.ctx, intent); err != nil {
 		e.logger.Error("persisting intent",
 			"client", intent.ClientName, "action", intent.Action, "error", err)
 	}

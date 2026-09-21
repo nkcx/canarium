@@ -300,6 +300,15 @@ func (e *Executor) clearActiveSequence() {
 //
 // The state layer receives a copy, never the live struct: it would otherwise
 // read fields while the executor goroutine writes them.
+// saveSequenceDurable persists the sequence and waits for it to reach the
+// disk. Used when crossing the point of no return: a restart that could not
+// see that flag would offer an abort that is no longer safe to take.
+func (e *Executor) saveSequenceDurable(as *ActiveSequence) {
+	if err := e.db.SaveSequenceDurable(e.ctx, as.persistable()); err != nil {
+		e.logger.Error("persisting sequence", "sequence", as.ID(), "error", err)
+	}
+}
+
 func (e *Executor) saveSequence(as *ActiveSequence) {
 	if err := e.db.SaveSequence(e.ctx, as.persistable()); err != nil {
 		e.logger.Error("persisting sequence state", "sequence", as.ID(), "error", err)
