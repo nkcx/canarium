@@ -19,8 +19,19 @@ make check
 ```
 
 That runs everything CI does: `gofmt`, `go vet`, `golangci-lint`,
-`go test -race`, and `go mod tidy -diff`. CI additionally runs `govulncheck`
-and `npm audit`.
+`go test -race`, the frontend tests, and `go mod tidy -diff`. CI additionally
+runs `govulncheck` and `npm audit`.
+
+`make test-web` runs the frontend tests alone (`vitest`). They cover the
+logic in `web/src/lib` — which fact leads the dashboard, what a client
+state is called, whether an event reads as a sentence — rather than the
+components around it. That logic decides what an operator sees first
+during an outage, so it is worth pinning.
+
+CI runs on every branch, not just `main`. Container images are published
+only from `main` and from release tags; a branch builds the image for one
+architecture and discards it, which proves the Dockerfile still matches the
+sources without spending twenty minutes emulating arm64.
 
 ## What this code is for
 

@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 # host and cross-compiled targets.
 export CGO_ENABLED = 0
 
-.PHONY: all build build-frontend build-go test test-race lint fmt vet govulncheck audit check clean distclean dev dist
+.PHONY: all build build-frontend build-go test test-race test-web lint fmt vet govulncheck audit check clean distclean dev dist
 
 all: build
 
@@ -28,6 +28,12 @@ test:
 test-race:
 	CGO_ENABLED=1 go test -race -count=1 ./...
 
+# The dashboard decides what an operator sees first during an outage --
+# which fact leads, what a client state is called, whether an event reads
+# as a sentence. That logic lives in web/src/lib and is worth testing.
+test-web:
+	cd web && npm test
+
 fmt:
 	gofmt -w ./cmd ./internal ./modules ./web.go
 
@@ -44,7 +50,7 @@ lint:
 	golangci-lint run
 
 # Everything CI enforces, runnable locally before pushing.
-check: vet lint test-race
+check: vet lint test-race test-web
 	@unformatted=$$(gofmt -l ./cmd ./internal ./modules ./web.go); \
 	if [ -n "$$unformatted" ]; then \
 		echo "Not gofmt-formatted:"; echo "$$unformatted"; exit 1; \

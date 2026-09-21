@@ -101,7 +101,27 @@ docker run -d \
   -p 8420:8420 \
   -v ./canarium.yaml:/etc/canarium/config.yaml \
   -v canarium-data:/var/lib/canarium \
-  ghcr.io/nkcx/canarium:latest
+  ghcr.io/nkcx/canarium:0.1.1
+```
+
+### Image tags
+
+Images are published to `ghcr.io/nkcx/canarium` for `linux/amd64`,
+`linux/arm64` and `linux/arm/v7`.
+
+| Tag | Moves |
+|---|---|
+| `0.1.1` | Never. Pin this for anything you care about. |
+| `0.1` | With each patch release in the 0.1 series. |
+| `latest` | With each release. |
+| `main` | With every commit to `main`. Unreleased; expect breakage. |
+
+Each image carries an SBOM and signed build provenance, so you can
+establish it was built by this repository rather than by whoever last held
+a registry token:
+
+```bash
+gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.1 --repo nkcx/canarium
 ```
 
 ## How it works

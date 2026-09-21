@@ -2,18 +2,23 @@
 > Several sections were written ahead of the implementation and, for a period,
 > described behaviour the code did not have — notably stale-fact handling
 > (§4.3-4.4), monotonic dwell tracking (§5.3), multi-UPS feed policy (§6.2-6.3)
-> and point-of-no-return semantics (§7.4). Those are now implemented as
-> written. Where the spec and the code disagree, the code is the authority and
-> the disagreement is a bug in one of them; please report it.
+> and point-of-no-return semantics (§7.4), durability of critical writes
+> (§8.4) and the audit journal (§8.6). Those are now implemented as written.
+> Where the spec and the code disagree, the code is the authority and the
+> disagreement is a bug in one of them; please report it.
+>
+> One deliberate deviation: §8.4 originally specified a forced WAL
+> checkpoint for critical writes. The implementation raises `synchronous`
+> to `FULL` instead, which is the same guarantee for about 40% of the cost.
+> The section has been updated to describe what the code does and why.
 >
 > Not implemented: in-sequence condition latching (§4.4), the plan editor and
-> condition builder in the web UI (§11), forced WAL checkpoints on critical
-> writes (§10), and federated auth.
+> condition builder in the web UI (§11), and federated auth.
 
 # Canarium — Product Specification
 
 **Version:** 0.3
-**Status:** Design — pre-implementation
+**Status:** Implemented as of v0.1.1, with the exceptions noted above
 
 ---
 
@@ -128,14 +133,17 @@ Web UI: embedded SPA built with Svelte and Tailwind CSS, compiled into the Go bi
 
 Single process. Container image and native binary both first-class.
 
-Container images published to `ghcr.io/nkcx/canarium`, multi-arch (amd64, arm64, armv7).
+Container images published to `ghcr.io/nkcx/canarium`, multi-arch (amd64, arm64, armv7), carrying an SBOM and signed build provenance. Version tags (`0.1.1`, `0.1`) are pinnable; `latest` follows releases and `main` follows the branch.
 
 Reference `compose.yaml` shipped in the repository:
 
 ```yaml
 services:
   canarium:
-    image: ghcr.io/nkcx/canarium:latest
+    # Pinned deliberately: this is the thing that shuts your fleet down,
+    # and an unattended `docker compose pull` should not be able to change
+    # its behaviour. Use :latest instead if you would rather track releases.
+    image: ghcr.io/nkcx/canarium:0.1.1
     ports:
       - "8420:8420"
     volumes:
@@ -718,7 +726,13 @@ Canarium must outlive everything it controls. Validation rejects:
 
 Transports declare whether each action is idempotent in their capability manifest.
 
-**Fsync:** the database is opened with `PRAGMA synchronous = NORMAL` (WAL mode default), which fsyncs at checkpoint boundaries. For critical writes (intent records, PONR flag), the executor forces a WAL checkpoint. This balances durability with write volume on flash storage.
+**Fsync:** the database is opened with `PRAGMA synchronous = NORMAL` (WAL mode default), which fsyncs at checkpoint boundaries. This balances durability with write volume on flash storage — years of idle polling do not chew through an SD card.
+
+The cost of that default lands badly here: a commit can be acknowledged and then lost if the machine dies before the next checkpoint, and the machine dying is the event Canarium exists to handle. So the critical writes — the intent record written immediately before a shutdown command goes out, and the sequence saved when a PONR stage begins — are made durable individually.
+
+The mechanism is to raise `synchronous` to `FULL` for the duration of those writes, which fsyncs the write-ahead log on commit. An earlier revision of this section specified a forced WAL checkpoint instead. A checkpoint does imply durability, but it reaches it by transferring every pending frame into the database file and fsyncing that — work proportional to the size of the log, repeated on every critical write, and it blocks on readers. Measured against this schema it cost about 2.5× the alternative for the same guarantee. Fsyncing the log is the primitive actually wanted.
+
+Everything else — client state changes, stage records, dwell timers — rides the normal checkpoint schedule, because re-deriving those by probing is what crash recovery already does.
 
 On restart mid-sequence, Canarium resumes from the last completed stage. Within a partially-completed stage, it probes all clients to reconcile actual state with recorded state before proceeding.
 
