@@ -530,8 +530,8 @@ func runDaemon(configPath string) error {
 	server.SetVersion(version)
 	executor.AddListener(server.EventListener())
 
-	if state.DataDirWarning != "" {
-		logger.Warn(state.DataDirWarning)
+	for _, warning := range db.Warnings() {
+		logger.Warn(warning)
 	}
 
 	warnIfNoAdminPassword(ctx, cfg, db, logger)

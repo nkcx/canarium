@@ -67,7 +67,7 @@ RUN addgroup -g 65532 -S canarium \
  && adduser -u 65532 -S -G canarium -H -s /sbin/nologin canarium \
  && mkdir -p /var/lib/canarium /etc/canarium \
  && chown -R canarium:canarium /var/lib/canarium \
- && chmod 0750 /var/lib/canarium
+ && chmod 0700 /var/lib/canarium
 
 COPY --from=backend /out/canarium /usr/local/bin/canarium
 

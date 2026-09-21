@@ -10,6 +10,8 @@ export const events = writable([]);
 export const authenticated = writable(false);
 export const needsSetup = writable(false);
 export const minPasswordLength = writable(12);
+export const passwordPinned = writable(false);
+export const configReadonly = writable(false);
 
 const MAX_EVENTS = 100;
 
@@ -81,6 +83,8 @@ export async function checkAuth() {
     if (typeof info.min_password_length === 'number') {
       minPasswordLength.set(info.min_password_length);
     }
+    passwordPinned.set(Boolean(info.password_pinned));
+    configReadonly.set(Boolean(info.config_readonly));
   } catch (e) {
     console.error('auth status check failed:', e);
     needsSetup.set(false);
@@ -131,6 +135,30 @@ export async function setup(password) {
     return login(password);
   } catch (e) {
     return { ok: false, error: 'Could not reach the server' };
+  }
+}
+
+/**
+ * Changes the admin password.
+ *
+ * The current password is required even though the caller holds a session:
+ * an unattended browser must not be able to lock the real operator out.
+ * Every session is invalidated on success, including this one.
+ */
+export async function changePassword(currentPassword, newPassword) {
+  try {
+    await apiFetch('/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+    disconnectWS();
+    authenticated.set(false);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
@@ -244,6 +272,11 @@ const REFRESH_TRIGGERING_EVENTS = new Set([
   'stage_forced',
   'wake_gate_satisfied',
   'sequence_completed',
+  // Wake outcomes change client state and were previously missing, so the
+  // dashboard did not refresh as hosts came back.
+  'client_wake_success',
+  'client_wake_failed',
+  'ponr_crossed',
 ]);
 
 /**

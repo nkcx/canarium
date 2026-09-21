@@ -117,18 +117,18 @@ func TestExistingLooseDataDirIsReported(t *testing.T) {
 		t.Fatalf("creating dir: %v", err)
 	}
 
-	DataDirWarning = ""
 	db, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
 
-	if DataDirWarning == "" {
-		t.Error("a world-readable data directory produced no warning")
+	warnings := db.Warnings()
+	if len(warnings) == 0 {
+		t.Fatal("a world-readable data directory produced no warning")
 	}
-	if !strings.Contains(DataDirWarning, "chmod") {
-		t.Errorf("the warning does not say how to fix it: %q", DataDirWarning)
+	if !strings.Contains(warnings[0], "chmod") {
+		t.Errorf("the warning does not say how to fix it: %q", warnings[0])
 	}
 }
 
@@ -138,15 +138,32 @@ func TestTightDataDirProducesNoWarning(t *testing.T) {
 		t.Fatalf("creating dir: %v", err)
 	}
 
-	DataDirWarning = ""
 	db, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
 
-	if DataDirWarning != "" {
-		t.Errorf("a 0700 data directory produced a warning: %q", DataDirWarning)
+	if warnings := db.Warnings(); len(warnings) != 0 {
+		t.Errorf("a 0700 data directory produced warnings: %v", warnings)
+	}
+}
+
+// TestDockerfileDataDirModeProducesNoWarning pins the mode the container
+// image creates against the check that runs at startup. They disagreed:
+// the image used 0750 and every container logged an alarming permissions
+// warning on boot.
+func TestDockerfileDataDirModeProducesNoWarning(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("creating dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	if w := checkDataDirPermissions(dir); w != "" {
+		t.Errorf("the mode the Dockerfile sets produces a startup warning: %q", w)
 	}
 }
 

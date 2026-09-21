@@ -53,14 +53,26 @@ func (d *DB) SaveAPIToken(ctx context.Context, tokenHash, name, scope string) er
 	return nil
 }
 
-// ValidateAPIToken returns the scope for a token digest, or "" if unknown.
+// lastUsedResolution is how coarsely token use is recorded.
 //
-// It also records the use, so an operator can tell which tokens are live
-// before revoking one.
+// last_used_at answers "is this token still in use?", for which five-minute
+// granularity is ample. Recording every use meant a SQLite write on every
+// authenticated request: a monitoring system polling /api/status every few
+// seconds produced a continuous write stream, and because the pool is capped
+// at a single connection each write blocked concurrent readers. On the SD
+// card this is expected to run from, that is also avoidable flash wear.
+const lastUsedResolution = 5 * time.Minute
+
+// ValidateAPIToken returns the scope for a token digest, or "" if unknown.
 func (d *DB) ValidateAPIToken(ctx context.Context, tokenHash string) (string, error) {
-	var scope string
-	err := d.db.QueryRowContext(ctx,
-		"SELECT scope FROM api_tokens WHERE token_hash = ?", tokenHash).Scan(&scope)
+	var (
+		scope    string
+		lastUsed sql.NullInt64
+	)
+	err := d.db.QueryRowContext(ctx, `
+		SELECT scope, COALESCE(strftime('%s', last_used_at), 0)
+		FROM api_tokens WHERE token_hash = ?
+	`, tokenHash).Scan(&scope, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -68,20 +80,26 @@ func (d *DB) ValidateAPIToken(ctx context.Context, tokenHash string) (string, er
 		return "", fmt.Errorf("validating API token: %w", err)
 	}
 
-	if _, err := d.db.ExecContext(ctx,
-		"UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?",
-		time.Now().Format(time.RFC3339Nano), tokenHash,
-	); err != nil {
-		// Deliberately not fatal. last_used_at is diagnostic: it tells an
-		// operator which tokens are live before they revoke one. Failing
-		// authentication because that bookkeeping write failed would turn a
-		// full disk into an outage.
-		//
-		//nolint:nilerr // the token is valid regardless of this write
-		return scope, nil
+	d.recordTokenUse(ctx, tokenHash, time.Unix(lastUsed.Int64, 0))
+	return scope, nil
+}
+
+// recordTokenUse updates last_used_at, but only when it is stale enough to
+// be worth a write.
+//
+// Failures are ignored on purpose: this is diagnostic bookkeeping, and
+// failing authentication because a full disk rejected it would turn a
+// housekeeping problem into an outage.
+func (d *DB) recordTokenUse(ctx context.Context, tokenHash string, lastUsed time.Time) {
+	now := time.Now()
+	if !lastUsed.IsZero() && now.Sub(lastUsed) < lastUsedResolution {
+		return
 	}
 
-	return scope, nil
+	//nolint:errcheck // diagnostic only; see doc comment
+	_, _ = d.db.ExecContext(ctx,
+		"UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?",
+		now.Format(time.RFC3339Nano), tokenHash)
 }
 
 // ListAPITokens returns every stored token's metadata, newest first.

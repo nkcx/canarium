@@ -1,5 +1,14 @@
 <script>
-  import { status, setMode, abortSequence, proceedStage } from '../lib/stores/api.js';
+  import {
+    status,
+    setMode,
+    abortSequence,
+    proceedStage,
+    changePassword,
+    minPasswordLength,
+    passwordPinned,
+    configReadonly,
+  } from '../lib/stores/api.js';
 
   let modeChanging = false;
   let aborting = false;
@@ -17,6 +26,12 @@
   $: heldStage = sequence?.held_stage ?? '';
 
   async function changeMode(mode) {
+    if ($configReadonly) {
+      error =
+        'config_readonly is set; change canarium.mode in the configuration file and restart.';
+      return;
+    }
+
     if (mode === 'armed' && $status?.mode !== 'armed') {
       const ok = confirm(
         'Arm Canarium?\n\n' +
@@ -43,6 +58,38 @@
     aborting = false;
   }
 
+  let currentPassword = '';
+  let newPassword = '';
+  let confirmPassword = '';
+  let changingPassword = false;
+  let passwordError = '';
+
+  $: passwordTooShort =
+    newPassword.length > 0 && newPassword.length < $minPasswordLength;
+  $: passwordMismatch =
+    confirmPassword.length > 0 && newPassword !== confirmPassword;
+  $: canChangePassword =
+    !changingPassword &&
+    currentPassword.length > 0 &&
+    newPassword.length >= $minPasswordLength &&
+    newPassword === confirmPassword;
+
+  async function handlePasswordChange() {
+    if (!canChangePassword) return;
+
+    changingPassword = true;
+    passwordError = '';
+
+    const result = await changePassword(currentPassword, newPassword);
+    if (!result.ok) {
+      passwordError = result.error;
+      changingPassword = false;
+      return;
+    }
+    // On success every session is invalidated, including this one, so the
+    // app returns to the login screen on its own.
+  }
+
   async function handleProceed() {
     const ok = confirm(
       `Force stage "${heldStage}" to proceed?\n\n` +
@@ -64,6 +111,11 @@
   <!-- Mode -->
   <section class="mb-8">
     <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">MODE</h2>
+    {#if $configReadonly}
+      <div class="text-[10px] text-ink-muted mb-2">
+        Read-only: the mode comes from the configuration file.
+      </div>
+    {/if}
     <div class="space-y-2">
       {#each modes as mode (mode.id)}
         <button
@@ -72,7 +124,10 @@
               ? 'border-amber bg-amber/5 text-ink'
               : 'border-edge bg-surface-50 text-ink-secondary hover:border-edge-strong'}"
           onclick={() => changeMode(mode.id)}
-          disabled={modeChanging}
+          disabled={modeChanging || $configReadonly}
+          title={$configReadonly
+            ? 'config_readonly is set; the mode comes from the configuration file'
+            : mode.desc}
         >
           <div class="flex items-center gap-2">
             <span class="text-xs font-bold">{mode.label}</span>
@@ -164,6 +219,67 @@
     </div>
   {/if}
 
+  <!-- Admin password -->
+  {#if !$passwordPinned}
+    <section class="mb-8">
+      <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">ADMIN PASSWORD</h2>
+      <div class="border border-edge rounded-[var(--radius-sm)] bg-surface-50 p-4 max-w-sm">
+        <div class="text-[10px] text-ink-muted mb-3">
+          Changing this signs out every session, including this one.
+        </div>
+
+        <form onsubmit={e => { e.preventDefault(); handlePasswordChange(); }}>
+          <input
+            type="password"
+            bind:value={currentPassword}
+            class="w-full px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
+              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
+            placeholder="Current password"
+            autocomplete="current-password"
+          />
+          <input
+            type="password"
+            bind:value={newPassword}
+            class="w-full mt-2 px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
+              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
+            placeholder={`New password (at least ${$minPasswordLength} characters)`}
+            autocomplete="new-password"
+          />
+          <input
+            type="password"
+            bind:value={confirmPassword}
+            class="w-full mt-2 px-3 py-2 bg-surface-100 border border-edge rounded-[var(--radius-sm)]
+              text-ink text-xs focus:outline-none focus:border-amber placeholder:text-ink-faint"
+            placeholder="Confirm new password"
+            autocomplete="new-password"
+          />
+
+          {#if passwordTooShort}
+            <div class="text-warn text-[10px] mt-1.5">
+              Must be at least {$minPasswordLength} characters.
+            </div>
+          {:else if passwordMismatch}
+            <div class="text-warn text-[10px] mt-1.5">Passwords do not match.</div>
+          {/if}
+
+          {#if passwordError}
+            <div class="text-danger text-[10px] mt-1.5">{passwordError}</div>
+          {/if}
+
+          <button
+            type="submit"
+            disabled={!canChangePassword}
+            class="w-full mt-3 px-3 py-2 bg-surface-100 border border-edge text-ink-secondary
+              text-xs rounded-[var(--radius-sm)] hover:border-edge-strong hover:text-ink
+              transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {changingPassword ? 'Changing...' : 'Change password'}
+          </button>
+        </form>
+      </div>
+    </section>
+  {/if}
+
   <!-- Info -->
   <section>
     <h2 class="text-[10px] text-ink-muted tracking-wider mb-3">SYSTEM</h2>
@@ -174,7 +290,9 @@
       </div>
       <div class="flex justify-between">
         <span class="text-ink-muted">Auth</span>
-        <span class="text-ink-secondary">Local admin</span>
+        <span class="text-ink-secondary">
+          {$passwordPinned ? 'Local admin (set in config file)' : 'Local admin'}
+        </span>
       </div>
       <div class="flex justify-between">
         <span class="text-ink-muted">Storage</span>

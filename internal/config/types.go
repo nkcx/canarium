@@ -112,6 +112,15 @@ type AuthConfig struct {
 	// directly, a client can set these headers itself.
 	TrustProxyHeaders bool `yaml:"trust_proxy_headers,omitempty"`
 
+	// TrustedProxies lists the networks whose forwarding headers are
+	// believed, in CIDR notation. Only consulted when TrustProxyHeaders is
+	// set; defaults to loopback and the private ranges.
+	//
+	// The addresses here are the *proxy's*, not your clients'. Setting this
+	// too broadly lets anyone within the range forge a source address,
+	// evading rate limiting and locking out whoever they impersonate.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+
 	// AllowedOrigins lists additional origins permitted to open a WebSocket
 	// connection. Same-origin requests are always allowed; this is only
 	// needed when the UI is served from a different host than the API, such

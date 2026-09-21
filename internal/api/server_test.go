@@ -4,12 +4,15 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/nkcx/canarium/internal/conditions"
 	"github.com/nkcx/canarium/internal/config"
@@ -374,52 +377,86 @@ func TestSessionCookieAttributes(t *testing.T) {
 	}
 }
 
+// loginThrough sends a login from a given peer address with the given
+// headers, and returns the session cookie it set, if any.
+func loginThrough(t *testing.T, s *Server, remoteAddr string, headers map[string]string) *http.Cookie {
+	t.Helper()
+
+	req := httptest.NewRequest("POST", "/api/auth/login",
+		strings.NewReader(`{"password":"`+testPassword+`"}`))
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login from %s: got %d, body %s", remoteAddr, rec.Code, rec.Body.String())
+	}
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			return c
+		}
+	}
+	t.Fatal("login set no session cookie")
+	return nil
+}
+
 // TestSessionCookieIsSecureBehindTrustedProxy covers the opt-in path where an
 // operator has declared that Canarium is only reachable through a proxy.
 func TestSessionCookieIsSecureBehindTrustedProxy(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.cfg.Canarium.Auth.TrustProxyHeaders = true
+	s.proxies = newProxyTruster(true, nil, s.logger)
 
 	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
 		t.Fatalf("setup: got %d", rec.Code)
 	}
 
-	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Forwarded-Proto", "https")
-	rec := httptest.NewRecorder()
-	s.mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("login: got %d", rec.Code)
-	}
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName && !c.Secure {
-			t.Error("session cookie is not Secure despite X-Forwarded-Proto: https")
-		}
+	// From loopback, which the default trusted set includes.
+	cookie := loginThrough(t, s, "127.0.0.1:44444",
+		map[string]string{"X-Forwarded-Proto": "https"})
+	if !cookie.Secure {
+		t.Error("session cookie is not Secure despite a trusted X-Forwarded-Proto: https")
 	}
 }
 
-// TestForwardedProtoIsIgnoredWhenProxyNotTrusted: the header is
-// attacker-controlled when the daemon is reachable directly.
-func TestForwardedProtoIsIgnoredWhenProxyNotTrusted(t *testing.T) {
+// TestForwardedProtoIsIgnoredFromAnUntrustedSource: the header is
+// attacker-controlled unless the request actually came from a proxy.
+func TestForwardedProtoIsIgnoredFromAnUntrustedSource(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.Auth.TrustProxyHeaders = true
+	s.proxies = newProxyTruster(true, nil, s.logger)
+
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+
+	// A public address is not a proxy, even with the opt-in set.
+	cookie := loginThrough(t, s, "203.0.113.9:44444",
+		map[string]string{"X-Forwarded-Proto": "https"})
+	if cookie.Secure {
+		t.Error("a forwarded header from a non-proxy source set the Secure flag; " +
+			"anyone reaching the port directly could break login over plain HTTP")
+	}
+}
+
+// TestForwardedProtoIsIgnoredWhenProxyTrustIsOff covers the default.
+func TestForwardedProtoIsIgnoredWhenProxyTrustIsOff(t *testing.T) {
 	s, _ := newTestServer(t)
 
 	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
 		t.Fatalf("setup: got %d", rec.Code)
 	}
 
-	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Forwarded-Proto", "https")
-	rec := httptest.NewRecorder()
-	s.mux.ServeHTTP(rec, req)
-
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookieName && c.Secure {
-			t.Error("an untrusted X-Forwarded-Proto header set the Secure flag, " +
-				"which would break login over plain HTTP")
-		}
+	cookie := loginThrough(t, s, "127.0.0.1:44444",
+		map[string]string{"X-Forwarded-Proto": "https"})
+	if cookie.Secure {
+		t.Error("an X-Forwarded-Proto header set the Secure flag with " +
+			"trust_proxy_headers off, which would break login over plain HTTP")
 	}
 }
 
@@ -709,5 +746,159 @@ func TestAPIRoutesTakePrecedenceOverTheSPAFallback(t *testing.T) {
 
 	if rec := do(t, s, "GET", "/api/health", ""); rec.Code != http.StatusOK {
 		t.Errorf("/api/health got %d, want 200 — the catch-all route shadowed it", rec.Code)
+	}
+}
+
+// TestSetupIsThrottled is the regression test for an unauthenticated,
+// unthrottled endpoint that hashes its input with bcrypt. On the hardware
+// this targets that is about a second of a core per request, so an anonymous
+// client could starve the probe and policy loops.
+func TestSetupIsThrottled(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.setupLimiter = newFailureLimiter(2, time.Minute, time.Hour)
+
+	send := func() int {
+		req := httptest.NewRequest("POST", "/api/auth/setup",
+			strings.NewReader(`{"password":"short"}`)) // rejected, but still counted
+		req.RemoteAddr = "203.0.113.5:1234"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for i := 0; i < 2; i++ {
+		if code := send(); code == http.StatusTooManyRequests {
+			t.Fatalf("throttled at attempt %d, too early", i+1)
+		}
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Errorf("got %d past the threshold, want 429", code)
+	}
+}
+
+// TestConcurrentSetupClaimsOnce covers the check-then-act race: the existing
+// hash was read, then bcrypt ran for a second or more, then the write
+// happened. Two requests arriving together could both pass the check.
+func TestConcurrentSetupClaimsOnce(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.setupLimiter = newFailureLimiter(100, time.Minute, time.Hour)
+
+	const attempts = 8
+	codes := make(chan int, attempts)
+
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"password":"password-number-%02d-long"}`, i)
+			req := httptest.NewRequest("POST", "/api/auth/setup", strings.NewReader(body))
+			req.RemoteAddr = fmt.Sprintf("203.0.113.%d:1234", i+1)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			codes <- rec.Code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+
+	var succeeded int
+	for code := range codes {
+		if code == http.StatusOK {
+			succeeded++
+		}
+	}
+
+	if succeeded != 1 {
+		t.Errorf("%d concurrent setup requests succeeded, want exactly 1 — "+
+			"the last writer would take the admin account", succeeded)
+	}
+}
+
+func TestPasswordChangeRequiresTheCurrentPassword(t *testing.T) {
+	s, _ := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	rec := do(t, s, "POST", "/api/auth/password",
+		`{"current_password":"wrong","new_password":"another-long-password"}`, cookie)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("got %d, want 401 — an unattended browser must not be able to "+
+			"lock the operator out", rec.Code)
+	}
+}
+
+// TestPasswordChangeInvalidatesSessions: if the reason for rotating is a
+// suspected compromise, leaving existing sessions valid defeats the point.
+func TestPasswordChangeInvalidatesSessions(t *testing.T) {
+	s, db := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	const newPassword = "a-brand-new-long-password"
+	rec := do(t, s, "POST", "/api/auth/password",
+		`{"current_password":"`+testPassword+`","new_password":"`+newPassword+`"}`, cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := do(t, s, "GET", "/api/status", "", cookie); rec.Code != http.StatusUnauthorized {
+		t.Errorf("the old session still works after a password change: got %d", rec.Code)
+	}
+
+	count, err := db.CountSessions(t.Context())
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("%d sessions survived a password change", count)
+	}
+
+	// The new password works.
+	rec = do(t, s, "POST", "/api/auth/login", `{"password":"`+newPassword+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Errorf("the new password does not work: got %d", rec.Code)
+	}
+}
+
+func TestPasswordChangeRejectsWeakOrIdenticalPasswords(t *testing.T) {
+	s, _ := newTestServer(t)
+	if rec := do(t, s, "POST", "/api/auth/setup", `{"password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("setup: got %d", rec.Code)
+	}
+	cookie := sessionCookie(t, s)
+
+	for _, tc := range []struct{ name, body string }{
+		{"too short", `{"current_password":"` + testPassword + `","new_password":"short"}`},
+		{"unchanged", `{"current_password":"` + testPassword + `","new_password":"` + testPassword + `"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if rec := do(t, s, "POST", "/api/auth/password", tc.body, cookie); rec.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+func TestPasswordChangeRefusedWhenPinned(t *testing.T) {
+	hash, err := HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+
+	s, _ := newTestServer(t)
+	s.cfg.Canarium.Auth.PasswordHash = hash
+	cookie := sessionCookie(t, s)
+
+	rec := do(t, s, "POST", "/api/auth/password",
+		`{"current_password":"`+testPassword+`","new_password":"another-long-password"}`, cookie)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("got %d, want 403 for a config-pinned password", rec.Code)
 	}
 }

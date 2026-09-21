@@ -19,6 +19,16 @@ import (
 
 type DB struct {
 	db *sql.DB
+
+	// warnings holds non-fatal concerns found while opening, for the caller
+	// to log. Returned rather than held in a package global so concurrent
+	// opens — which tests do routinely — cannot overwrite each other.
+	warnings []string
+}
+
+// Warnings returns non-fatal concerns found while opening the database.
+func (d *DB) Warnings() []string {
+	return append([]string(nil), d.warnings...)
 }
 
 const (
@@ -37,14 +47,6 @@ const (
 func Open(ctx context.Context, dataDir string) (*DB, error) {
 	if err := os.MkdirAll(dataDir, dataDirMode); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
-	}
-
-	// MkdirAll leaves an existing directory's permissions alone, so a data
-	// directory created by a deployment script or a bind mount may be world
-	// readable. Tightening it silently could break a deliberately shared
-	// setup, so report it and let the operator decide.
-	if warning := checkDataDirPermissions(dataDir); warning != "" {
-		DataDirWarning = warning
 	}
 
 	dbPath := filepath.Join(dataDir, "state.db")
@@ -92,16 +94,25 @@ func Open(ctx context.Context, dataDir string) (*DB, error) {
 		}
 	}
 
-	return &DB{db: db}, nil
+	return &DB{
+		db: db,
+		// MkdirAll leaves an existing directory's permissions alone, so a
+		// data directory created by a deployment script or a bind mount may
+		// be readable beyond its owner. Tightening it silently could break a
+		// deliberately shared setup, so report it and let the operator
+		// decide.
+		warnings: collectWarnings(dataDir),
+	}, nil
 }
 
-// DataDirWarning holds a permissions concern found during Open, if any.
-//
-// A package-level value rather than a returned error because it must not
-// prevent the daemon starting: the database itself is created 0600
-// regardless, and refusing to run over a directory mode would be a worse
-// outcome than saying so.
-var DataDirWarning string
+// collectWarnings gathers non-fatal concerns found while opening.
+func collectWarnings(dataDir string) []string {
+	var warnings []string
+	if w := checkDataDirPermissions(dataDir); w != "" {
+		warnings = append(warnings, w)
+	}
+	return warnings
+}
 
 // checkDataDirPermissions reports a data directory readable beyond its owner.
 func checkDataDirPermissions(dataDir string) string {
@@ -389,6 +400,29 @@ func (d *DB) GetKV(ctx context.Context, key string) (string, error) {
 		return "", nil
 	}
 	return value, err
+}
+
+// ClaimInitialPassword sets the admin password only if none exists.
+//
+// Reports whether this caller won. The setup handler previously read the
+// existing hash, hashed the new password, and wrote — a check-then-act
+// sequence across a bcrypt call lasting a second or more on the hardware
+// this targets. Two requests arriving together could both pass the check,
+// and the last writer took the account.
+func (d *DB) ClaimInitialPassword(ctx context.Context, hash string) (bool, error) {
+	res, err := d.db.ExecContext(ctx, `
+		INSERT INTO auth (id, password_hash) VALUES (1, ?)
+		ON CONFLICT(id) DO NOTHING
+	`, hash)
+	if err != nil {
+		return false, fmt.Errorf("claiming the initial password: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("checking the initial password claim: %w", err)
+	}
+	return rows > 0, nil
 }
 
 func (d *DB) SetPasswordHash(ctx context.Context, hash string) error {

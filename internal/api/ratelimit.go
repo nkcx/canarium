@@ -23,6 +23,12 @@ const (
 	// limiterGCInterval is how often stale entries are swept, bounding the
 	// limiter's memory against an attacker cycling source addresses.
 	limiterGCInterval = 10 * time.Minute
+
+	// maxSetupAttempts bounds unauthenticated first-run setup requests from
+	// one source. It is lower than the login threshold: setup succeeds at
+	// most once in a daemon's lifetime, so anything beyond a couple of
+	// attempts is either a mistake or an attack.
+	maxSetupAttempts = 3
 )
 
 // loginFailureDelay is applied to every rejected login. It bounds the rate of
@@ -140,10 +146,11 @@ func (l *failureLimiter) gcLocked(now time.Time) {
 
 // clientIP identifies the source of a request for throttling purposes.
 //
-// X-Forwarded-For is consulted only when the operator has declared that
-// Canarium sits behind a trusted proxy. Honouring it unconditionally would
-// let an attacker defeat throttling entirely by varying the header, and
-// would also let them lock out other users by forging their addresses.
+// X-Forwarded-For is consulted only when the request itself arrived from a
+// trusted proxy — see Server.trustedProxy. Trusting the header on the
+// operator's say-so alone was not enough: with trust_proxy_headers set, any
+// client that could reach the port directly could both evade throttling by
+// varying the header and lock the real administrator out by forging theirs.
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

@@ -35,6 +35,11 @@ const (
 	// sessionCookieName is the cookie carrying the session token.
 	sessionCookieName = "canarium_session"
 
+	// MaxPasswordLength bounds what will be hashed. bcrypt pre-hashing means
+	// length is not a correctness problem, but an unauthenticated endpoint
+	// should not accept megabytes to hash.
+	MaxPasswordLength = 1024
+
 	// sessionReapInterval is how often expired sessions are pruned.
 	sessionReapInterval = 1 * time.Hour
 
@@ -63,6 +68,14 @@ type Server struct {
 	// loginLimiter throttles repeated failed logins per source address.
 	loginLimiter *failureLimiter
 
+	// setupLimiter throttles first-run setup attempts, which are
+	// unauthenticated and expensive.
+	setupLimiter *failureLimiter
+
+	// proxies decides whether a request's forwarding headers may be
+	// believed.
+	proxies *proxyTruster
+
 	// ctx is cancelled by Stop and bounds the server's background
 	// goroutines.
 	ctx    context.Context
@@ -89,6 +102,12 @@ func NewServer(
 		wsClients: make(map[*wsClient]struct{}),
 		loginLimiter: newFailureLimiter(
 			maxLoginFailures, failureWindow, lockoutDuration),
+		setupLimiter: newFailureLimiter(
+			maxSetupAttempts, failureWindow, lockoutDuration),
+		proxies: newProxyTruster(
+			cfg.Canarium.Auth.TrustProxyHeaders,
+			cfg.Canarium.Auth.TrustedProxies,
+			logger),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -108,6 +127,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleSetup)
+	s.mux.HandleFunc("POST /api/auth/password", s.requireScope(state.ScopeAdmin, s.handleChangePassword))
 
 	// Read scope: observing the system.
 	s.mux.HandleFunc("GET /api/status", s.requireScope(state.ScopeRead, s.handleStatus))
@@ -403,7 +423,7 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Warn("operating mode changed",
 		"from", previous.String(), "to", mode.String(),
-		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders))
+		"source", clientIP(r, s.trustedProxy(r)))
 
 	s.writeJSON(w, http.StatusOK, map[string]string{"mode": mode.String()})
 }
@@ -426,7 +446,7 @@ func (s *Server) handleAbort(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("abort requested via API",
-		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
+		"source", clientIP(r, s.trustedProxy(r)), "reason", reason)
 
 	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "abort requested"})
 }
@@ -451,13 +471,13 @@ func (s *Server) handleProceed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Warn("operator forced the current stage to proceed",
-		"source", clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders), "reason", reason)
+		"source", clientIP(r, s.trustedProxy(r)), "reason", reason)
 
 	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "proceed requested"})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	source := clientIP(r, s.cfg.Canarium.Auth.TrustProxyHeaders)
+	source := clientIP(r, s.trustedProxy(r))
 
 	if allowed, retryAfter := s.loginLimiter.Allow(source); !allowed {
 		s.logger.Warn("login attempt refused; source is locked out",
@@ -584,11 +604,11 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if !s.cfg.Canarium.Auth.TrustProxyHeaders {
+	if !s.trustedProxy(r) {
 		return false
 	}
-	// Only consulted when the operator has opted in, because these headers
-	// are attacker-controlled when the daemon is reachable directly.
+	// Only consulted for requests that actually arrived from a trusted
+	// proxy; these headers are attacker-controlled otherwise.
 	if proto := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
 		return true
 	}
@@ -613,6 +633,21 @@ func (s *Server) passwordIsPinned() bool {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	// Setup is unauthenticated and hashes its input with bcrypt, which on
+	// the single-board hardware this targets costs about a second of a core.
+	// Without throttling, an anonymous client could saturate every core and
+	// starve the probe and policy loops — a denial of service against the
+	// thing that is supposed to be watching the power.
+	source := clientIP(r, s.trustedProxy(r))
+	if allowed, retryAfter := s.setupLimiter.Allow(source); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		s.writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "too many setup attempts; try again later",
+		})
+		return
+	}
+	s.setupLimiter.RecordFailure(source)
+
 	if s.passwordIsPinned() {
 		s.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "the admin password is set in the configuration file",
@@ -639,14 +674,91 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Password) < MinPasswordLength {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("password must be at least %d characters", MinPasswordLength),
-		})
+	if err := validatePasswordStrength(req.Password); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
 	hash, err := hashPassword(req.Password)
+	if err != nil {
+		s.logger.Error("hashing password", "error", err)
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	// Atomic: the check above and this write are separated by a bcrypt call
+	// lasting a second or more on the hardware this targets, so two requests
+	// arriving together could both pass the check. Only one insert can win.
+	claimed, err := s.db.ClaimInitialPassword(r.Context(), hash)
+	if err != nil {
+		s.logger.Error("saving password hash", "error", err)
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save password"})
+		return
+	}
+	if !claimed {
+		s.writeJSON(w, http.StatusForbidden, map[string]string{"error": "password already set"})
+		return
+	}
+
+	s.setupLimiter.Reset(source)
+	s.logger.Info("admin password set", "source", source)
+
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleChangePassword rotates the admin password.
+//
+// There was previously no way to change it at all: once set through
+// first-run setup, an operator could not rotate a password they believed
+// compromised without deleting the database. DeleteAllSessions existed for
+// exactly this and had no caller.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if s.passwordIsPinned() {
+		s.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "the admin password is set in the configuration file",
+		})
+		return
+	}
+
+	var req struct {
+		Current string `json:"current_password"`
+		New     string `json:"new_password"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody)).Decode(&req); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	storedHash, err := s.passwordHash(r.Context())
+	if err != nil {
+		s.logger.Error("reading password hash", "error", err)
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	// Holding a session is not enough: an unattended browser must not be
+	// able to lock the real operator out.
+	if ok, _ := verifyPassword(storedHash, req.Current); !ok {
+		s.logger.Warn("password change rejected: current password incorrect",
+			"source", clientIP(r, s.trustedProxy(r)))
+		s.writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "current password is incorrect",
+		})
+		return
+	}
+
+	if err := validatePasswordStrength(req.New); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.New == req.Current {
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "the new password must differ from the current one",
+		})
+		return
+	}
+
+	hash, err := hashPassword(req.New)
 	if err != nil {
 		s.logger.Error("hashing password", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -658,7 +770,36 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Every existing session was issued against the old password. If the
+	// reason for rotating is a suspected compromise, leaving them valid
+	// defeats the point.
+	invalidated, err := s.db.DeleteAllSessions(r.Context())
+	if err != nil {
+		s.logger.Error("invalidating sessions after a password change", "error", err)
+	}
+
+	s.logger.Warn("admin password changed",
+		"source", clientIP(r, s.trustedProxy(r)), "sessions_invalidated", invalidated)
+
+	http.SetCookie(w, s.sessionCookie(r, "", -1))
+	s.writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"detail": "all sessions have been signed out; log in again",
+	})
+}
+
+// validatePasswordStrength applies the minimum requirements.
+func validatePasswordStrength(password string) error {
+	if len(password) < MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
+	}
+	if len(password) > MaxPasswordLength {
+		return fmt.Errorf("password must be at most %d characters", MaxPasswordLength)
+	}
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("password cannot be only whitespace")
+	}
+	return nil
 }
 
 // requireScope wraps a handler so it is reachable only by a caller holding at
