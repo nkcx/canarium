@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,5 +149,87 @@ func TestSaveSequenceDurablePreservesPonr(t *testing.T) {
 	}
 	if !got.PonrCrossed {
 		t.Error("the point-of-no-return flag was lost; the UI would offer an unsafe abort")
+	}
+}
+
+// TestDurablyDoesNotStarveItsOwnWrite is a regression test for a deadlock
+// that would have hung the daemon mid-shutdown.
+//
+// Durably pins a connection so it can raise synchronous for the duration.
+// The pool holds exactly one connection, so a write that reaches for the
+// pool instead of using the pinned one waits forever for a connection that
+// cannot be returned until the write completes. The first implementation
+// did exactly that, and the symptom was the shutdown path stopping dead
+// with no error, just before dispatching a command.
+func TestDurablyDoesNotStarveItsOwnWrite(t *testing.T) {
+	db := newTestDB(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- db.SaveSequenceDurable(ctx, &Sequence{
+			ID: "seq-1", PlanName: "outage", State: "shutting_down",
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SaveSequenceDurable: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("a durable write did not complete; it is waiting on the " +
+			"connection it is holding itself")
+	}
+}
+
+// TestDurablyRestoresTheDefault: leaving the pool's only connection on
+// synchronous=FULL would silently make every later write fsync, which is
+// the write amplification the NORMAL default exists to avoid on flash.
+func TestDurablyRestoresTheDefault(t *testing.T) {
+	db := newTestDB(t)
+
+	if err := db.SaveSequenceDurable(t.Context(), &Sequence{
+		ID: "seq-1", PlanName: "outage", State: "shutting_down",
+	}); err != nil {
+		t.Fatalf("SaveSequenceDurable: %v", err)
+	}
+
+	var synchronous int
+	if err := db.db.QueryRowContext(t.Context(), `PRAGMA synchronous`).
+		Scan(&synchronous); err != nil {
+		t.Fatalf("reading synchronous: %v", err)
+	}
+
+	// 1 is NORMAL, 2 is FULL.
+	if synchronous != 1 {
+		t.Errorf("synchronous = %d after a durable write, want 1 (NORMAL)", synchronous)
+	}
+}
+
+// TestDurablyRestoresTheDefaultAfterAFailedWrite: the restore has to happen
+// on the error path too, or one constraint violation leaves the daemon
+// fsyncing every write for the rest of its life.
+func TestDurablyRestoresTheDefaultAfterAFailedWrite(t *testing.T) {
+	db := newTestDB(t)
+
+	// A foreign key onto a sequence that does not exist.
+	err := db.SaveIntentDurable(t.Context(), &Intent{
+		ID: "int-1", SequenceID: "nonexistent", ClientName: "nas",
+		Action: "shutdown", Timestamp: time.Now(), Status: IntentDispatching,
+	})
+	if err == nil {
+		t.Fatal("an intent referencing a missing sequence was accepted")
+	}
+
+	var synchronous int
+	if err := db.db.QueryRowContext(t.Context(), `PRAGMA synchronous`).
+		Scan(&synchronous); err != nil {
+		t.Fatalf("reading synchronous: %v", err)
+	}
+	if synchronous != 1 {
+		t.Errorf("synchronous = %d after a failed durable write, want 1 (NORMAL)", synchronous)
 	}
 }

@@ -142,7 +142,18 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
+// execer is anything that can run a statement: the pool, a transaction, or
+// a single pinned connection. The critical writes take one so Durably can
+// run them on the connection it has raised the durability of.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (d *DB) SaveSequence(ctx context.Context, seq *Sequence) error {
+	return saveSequenceOn(ctx, d.db, seq)
+}
+
+func saveSequenceOn(ctx context.Context, ex execer, seq *Sequence) error {
 	preState, _ := json.Marshal(seq.PreSequenceState)
 	resolved, _ := json.Marshal(seq.ResolvedAddrs)
 
@@ -152,7 +163,7 @@ func (d *DB) SaveSequence(ctx context.Context, seq *Sequence) error {
 		completedAt = &s
 	}
 
-	_, err := d.db.ExecContext(ctx, `
+	_, err := ex.ExecContext(ctx, `
 		INSERT INTO sequences (
 			id, plan_name, state, current_stage, ponr_crossed, started_at,
 			completed_at, config_snapshot, pre_sequence_state, resolved_addrs,
@@ -343,6 +354,10 @@ func (d *DB) GetAllClientStates(ctx context.Context) (map[string]string, error) 
 }
 
 func (d *DB) SaveIntent(ctx context.Context, intent *Intent) error {
+	return saveIntentOn(ctx, d.db, intent)
+}
+
+func saveIntentOn(ctx context.Context, ex execer, intent *Intent) error {
 	var result *string
 	if intent.Result != nil {
 		b, _ := json.Marshal(intent.Result)
@@ -350,7 +365,7 @@ func (d *DB) SaveIntent(ctx context.Context, intent *Intent) error {
 		result = &s
 	}
 
-	_, err := d.db.ExecContext(ctx, `
+	_, err := ex.ExecContext(ctx, `
 		INSERT INTO intents (id, sequence_id, client_name, action, timestamp, status, result)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
