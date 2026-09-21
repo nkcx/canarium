@@ -18,14 +18,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.8"
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22.21"
           cache: npm
@@ -71,17 +71,18 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.8"
           cache: true
 
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
-          # v2 is required: earlier releases are built against Go 1.24 and
-          # refuse to analyse a module targeting a newer language version.
+          # This is the linter's own version, not the action's. v2 is
+          # required: earlier releases are built against Go 1.24 and refuse
+          # to analyse a module targeting a newer language version.
           version: v2.13.2
 
   build-image:
@@ -98,14 +99,14 @@ jobs:
       # become the image every deployment pulls.
       PUBLISH: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: env.PUBLISH == 'true'
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: env.PUBLISH == 'true'
         with:
           registry: ghcr.io
@@ -118,7 +119,7 @@ jobs:
       # emulating arm64 and arm/v7 on every push.
       - name: Build image (branch check)
         if: env.PUBLISH != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -130,7 +131,7 @@ jobs:
 
       - name: Build and publish image
         if: env.PUBLISH == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
