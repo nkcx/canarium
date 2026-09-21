@@ -173,3 +173,7 @@ threatened -- losing a sensor never starts a shutdown. Set
   implemented.
 
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
