@@ -183,7 +183,9 @@ clients:
 
 **`mac`** — optional if Canarium can discover it via ARP (same subnet, host is up). Required for reliable WOL if the host is on a different VLAN or might be down when Canarium starts.
 
-**`shutdown_budget`** — how long to wait for the client to shut down. Also serves as the state transition timeout: if Canarium can't probe the client (e.g., the switch it's behind is already down), it assumes shutdown completed after this duration.
+**`shutdown_budget`** — how long to wait for the client to shut down. Also serves as the state transition timeout: if Canarium can't probe the client (e.g., the switch it's behind is already down), it records `down_unverified` after this duration.
+
+Don't set it too tight. A machine that powers off cleanly on your local network stops answering without ever refusing a connection, and no router is in the path to report it unreachable — so the first probes after shutdown simply time out, which proves nothing. Only once your Canarium host stops caching the machine's hardware address does the kernel start reporting it unreachable, and that is the point Canarium can call it confirmed down. That takes roughly a minute. A budget shorter than that will usually finish as `down_unverified` even when the shutdown was perfect; `canarium validate` warns when it sees one under 90s. Minutes, not seconds, is the right scale.
 
 **`tags`** — labels for grouping clients in stages. A client can have multiple tags.
 
@@ -285,29 +287,30 @@ Use the `snmp-poe` transport to control Power over Ethernet on managed switches.
 
 **Key concept:** the client represents a *group of PoE ports on a switch*, not the switch itself. The switch stays on — Canarium controls which ports supply power.
 
+**Two addresses, two jobs.** `switch_address` is where the SNMP SET goes: the switch's management IP. `address` is the device being powered, and is what Canarium probes to verify the port actually went dead. These are different machines, so they are different fields.
+
+Earlier versions of this guide put the switch in `address`, which cannot be right for both purposes at once. Pointed at the switch, the probe checks a device that is always up, so a de-powered camera reads as up forever. Pointed at the camera, the SNMP SET goes somewhere that does not manage the switch's ports. Configurations with only `address` still work — the switch address falls back to it, and Canarium logs a warning once per client — but verification is meaningless until both are set.
+
 ```yaml
 clients:
-  - name: cameras
-    description: "All PoE cameras on core switch"
+  - name: camera-front-door
+    description: "Front door PoE camera"
     transport: snmp-poe
-    address: 10.0.1.2          # the switch's management IP
+    address: 10.0.1.51         # the camera — probed to confirm it lost power
     tags: [nonessential]
     feeds: [rack_ups]
     shutdown_budget: 0s        # PoE off is instant
+    probe:
+      method: tcp
+      port: 554                # a port the camera itself listens on
     config:
+      switch_address: 10.0.1.2 # the switch — where the SNMP SET goes
       snmp_version: 3
       snmp_user: canarium
       snmp_auth_pass: ${SWITCH_AUTH_PASS}
       snmp_priv_pass: ${SWITCH_PRIV_PASS}
       ports:
-        - { group: 1, port: 1 }
-        - { group: 1, port: 2 }
-        - { group: 1, port: 3 }
-        - { group: 1, port: 4 }
         - { group: 1, port: 5 }
-        - { group: 1, port: 6 }
-        - { group: 1, port: 7 }
-        - { group: 1, port: 8 }
 ```
 
 When this client's stage triggers, Canarium issues SNMP SET commands to disable PoE on all listed ports simultaneously. When the wake plan runs, it re-enables them.
@@ -323,7 +326,28 @@ snmpwalk -v3 -u canarium -l authPriv \
   10.0.1.2 1.3.6.1.2.1.105.1.1.1.3
 ```
 
-**Grouping:** You can have one client per device (`camera-front-door` with port 5) or one client for all devices (`all-cameras` with ports 1–8). Grouping all ports into one client means they all power down and up together as a single operation. Use separate clients if you need different shutdown/wake timing for different devices.
+**Grouping:** You can have one client per device, as above, or one client covering several ports:
+
+```yaml
+  - name: cameras
+    description: "All PoE cameras on core switch"
+    transport: snmp-poe
+    address: 10.0.1.51         # a representative camera, for verification
+    shutdown_budget: 0s
+    config:
+      switch_address: 10.0.1.2
+      snmp_version: 3
+      snmp_user: canarium
+      snmp_auth_pass: ${SWITCH_AUTH_PASS}
+      snmp_priv_pass: ${SWITCH_PRIV_PASS}
+      ports:
+        - { group: 1, port: 1 }
+        - { group: 1, port: 2 }
+        - { group: 1, port: 3 }
+        - { group: 1, port: 4 }
+```
+
+Grouping means they power down and up together as a single operation, which is what you want for a bank of identical devices. The cost is verification: one `address` cannot represent four cameras, so the probe confirms only that the representative one lost power. Use separate clients when you need per-device verification, or different shutdown and wake timing.
 
 **SNMPv3 is recommended** because PoE control requires SNMP write access. SNMPv2c works but sends the community string in plaintext. Configure your switch with an SNMPv3 user that has write access to the POWER-ETHERNET-MIB.
 
@@ -508,7 +532,11 @@ shutdown:
     ups: rack_ups
 ```
 
-The UPS cuts outlet power after the delay, then restores it when mains returns. Hosts with "restore on AC" boot automatically. **Make sure Canarium's own host is not powered by an outlet that will be cut** — it needs to stay on to run the wake plan.
+The UPS cuts outlet power after the delay, then restores it when mains returns. Hosts with "restore on AC" boot automatically.
+
+**Make sure Canarium's own host is not powered by an outlet that will be cut** — it needs to stay on to run the wake plan. `canarium validate` enforces what it can here: it refuses a plan whose stages shut down the host Canarium is running on, and refuses a `post_shutdown` block naming a UPS that isn't configured or an action Canarium doesn't implement. What it cannot know is which physical outlet your Pi is plugged into. Check that yourself.
+
+The `delay` must also leave room for the last stage to finish. The UPS starts counting when the command is issued, not when the machines are actually down.
 
 ---
 
@@ -659,7 +687,7 @@ canarium validate -c config.yaml
 canarium doctor -c config.yaml
 ```
 
-`validate` catches: missing fields, invalid durations, duplicate names, dependency cycles, same-stage dependency violations, unknown client references, invalid expressions.
+`validate` catches: missing fields, invalid and negative durations, duplicate names, dependency cycles, same-stage dependency violations, unknown client references, invalid expressions, plans that would shut down Canarium's own host, `post_shutdown` blocks naming an unknown UPS or unsupported action, and shutdown budgets too short to allow verification.
 
 `doctor` adds: client connectivity, transport credential verification, SNMP MIB availability, DNS resolution, NUT connectivity.
 
@@ -696,3 +724,39 @@ canarium doctor -c config.yaml
 - Once the budget expires, the client transitions to `down_unverified`
 - A guard period (default 60s) must pass before wake is attempted
 - Check if the shutdown command actually ran: look at the event log in the web UI
+
+### Clients always finish as down_unverified
+
+`down_unverified` means the shutdown command was sent and Canarium could not
+positively confirm the machine went down. It is not a failure — the wake plan
+handles these clients normally, after the guard period — but if *every* client
+reports it, something is configurable.
+
+- **The budget is too short.** See `shutdown_budget` above. Under about a
+  minute there is usually not enough time for confirmation to become possible.
+- **The probe is pointed at the wrong thing.** Check `probe.port` is a port the
+  machine itself listens on. For `snmp-poe` clients, check `address` is the
+  powered device and `switch_address` is the switch — pointed at the switch,
+  the probe checks something that never goes down.
+- **Canarium can't reach the client's network at all.** If the switch carrying
+  the path is shut down in an earlier stage, later clients behind it can never
+  be probed. That is working as intended; order the stages so infrastructure
+  goes last.
+
+### Where to find the record of what happened
+
+Every finished sequence writes a JSONL journal to `journal/` in the data
+directory: one line per event, with the plan, the stages, every command
+dispatched and what came back, plus the addresses and MACs as they were
+before anything was shut down.
+
+```bash
+# What happened, in order
+jq -r '"\(.timestamp) \(.type)"' /var/lib/canarium/journal/*.jsonl
+
+# Just the commands and their outcomes
+jq -c 'select(.type=="intent") | .data' /var/lib/canarium/journal/*.jsonl
+```
+
+Journals expire on the `canarium.journal_retain` schedule (30 days by
+default). Copy them off the device if you need a longer audit window.

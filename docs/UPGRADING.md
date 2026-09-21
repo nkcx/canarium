@@ -217,13 +217,51 @@ which may change behaviour if you had set them:
 
 | Field | What it now does |
 |---|---|
-| `canarium.journal_retain` | Finished sequences are pruned past the window. Was never read; the database grew forever. |
+| `canarium.journal_retain` | Finished sequences are pruned past the window, as are exported journal files. Was never read; the database grew forever. |
 | `canarium.config_readonly` | `POST /api/mode` is refused, so the file stays authoritative. |
 | `canarium.auth.password_hash` | Pins the admin password; first-run setup is disabled. |
 | `clients[].feeds`, `feed_policy` | Drive the derived `client.<name>.threatened` fact. |
 | `clients[].comms_loss_assumes` | Resolves what an unreadable feed means. Defaults to `safe`. |
 | `sources[].type: gpio` | Actually starts a GPIO source. Was silently ignored. |
 | NUT `username` / `password` | Sent to the server. Were dropped, so authenticated NUT servers rejected Canarium and `post_shutdown` could never work. |
+
+---
+
+## New: the admin password can be changed
+
+`POST /api/auth/password`, and an Admin Password section in Settings. It
+requires the current password and signs out every session, including the one
+that made the change — so you will land back on the login screen. That is
+the point: a rotation exists because the old password may be compromised,
+and sessions established under it should not survive.
+
+The section is hidden when `canarium.auth.password_hash` pins the password
+in the config file, and the endpoint refuses, since the file is canonical.
+
+---
+
+## New: forwarded headers are only trusted from a trusted peer
+
+`trust_proxy_headers: true` used to accept `X-Forwarded-For` from any
+connection, so any client could claim any source address — which set the
+`Secure` cookie flag and, more usefully to an attacker, sidestepped the
+per-address login rate limit by picking a fresh address for each attempt.
+
+Headers are now honoured only when the connection itself comes from a
+trusted peer. The default is loopback plus the RFC 1918 and ULA ranges,
+which covers the usual same-host or same-network proxy without any
+configuration. Narrow it with `canarium.auth.trusted_proxies`:
+
+```yaml
+canarium:
+  auth:
+    trust_proxy_headers: true
+    trusted_proxies: [10.0.0.8/32]
+```
+
+If your proxy is on a public address, you must list it — otherwise its
+requests are treated as direct and every client appears to come from the
+proxy's address.
 
 ---
 
@@ -240,3 +278,48 @@ automatically on the next successful login. Nothing is required of you.
 
 Sessions moved from the generic key-value table to their own, and old rows are
 discarded by the migration. **Everyone will need to log in again once.**
+
+---
+
+## New: every sequence writes an audit journal
+
+SPEC §8.6 specified it; nothing implemented it. Each finished sequence now
+writes `journal/<sequence-id>.jsonl` in the data directory — one
+self-describing JSON object per line, in time order:
+
+- a `sequence` header: plan, final state, whether the point of no return was
+  crossed, and the wake snapshot of addresses and MACs
+- a `stage` record per stage, with per-client outcomes
+- an `intent` record per dispatched command, with what the transport returned
+
+The database is still the authority. The journal is the portable artefact:
+something to archive, diff between outages, or hand to a colleague. It is
+mode 0600 in a 0700 directory, because it names every client and its address.
+
+Files expire on the same `canarium.journal_retain` schedule as the database
+rows. If you need a longer audit window, copy them off the device.
+
+No configuration is required. If your data directory is a bind mount, the
+`journal/` subdirectory appears inside it after the first sequence.
+
+---
+
+## New: validation is stricter
+
+`canarium validate` now fails on things it used to accept:
+
+| What | Why |
+|---|---|
+| Negative durations | `-5m` parsed fine and produced a budget that expired instantly. |
+| A plan that shuts down Canarium's own host | Canarium has to survive to run the wake plan (SPEC §8.3). Matched by hostname, configured addresses and local interface addresses. |
+| `post_shutdown` naming an unconfigured UPS, or an action other than `upscmd` | Previously accepted and silently did nothing at the end of an outage. |
+
+And warns on:
+
+| What | Why |
+|---|---|
+| `shutdown_budget` under 90s | A cleanly powered-off host on a local network cannot usually be confirmed down for about a minute, so short budgets finish as `down_unverified`. |
+| `snmp-poe` clients with no `switch_address` | `address` is being used for both the switch and the powered device. Still works, but the probe is checking the wrong machine. |
+
+If validation now fails on a config that used to pass, it is reporting
+something that was already not doing what it looked like it was doing.

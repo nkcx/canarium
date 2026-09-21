@@ -40,12 +40,27 @@ reported by `canarium doctor`.
 **SSH host keys** are verified. The default policy learns a key on first
 contact and refuses a subsequent change.
 
+**The admin password can be rotated** from Settings, or via
+`POST /api/auth/password`. The change requires the current password and
+invalidates every session, including the one that made it. Setting
+`canarium.auth.password_hash` in the configuration file pins the password;
+the endpoint then refuses, since the file is canonical.
+
 **Canarium terminates no TLS of its own.** Run it behind a reverse proxy and
 set `canarium.auth.trust_proxy_headers` so session cookies are marked
-`Secure`. The shipped compose file binds the API to localhost.
+`Secure`. Forwarded headers are honoured only from a trusted peer:
+loopback and the RFC 1918 / ULA ranges by default, narrowable with
+`canarium.auth.trusted_proxies`. A request arriving from anywhere else is
+treated as direct, so a client cannot spoof its own source address by
+sending `X-Forwarded-For`. The shipped compose file binds the API to
+localhost.
 
 **Credentials are redacted** from logs, the journal, the event stream and
 webhook payloads.
+
+**The audit journal** written for each completed sequence is mode 0600 in a
+0700 directory alongside the database. It names every client, its address
+and its MAC, and expires on the `canarium.journal_retain` schedule.
 
 **The state database** (admin password hash, session tokens, API token
 digests, learned SSH host keys) is created mode 0600 in a 0700 directory. If
@@ -56,9 +71,10 @@ startup rather than changing it.
 
 ## Known limitations
 
-- Authentication is a single local admin. There is no federated auth, no
-  multi-user support, and no audit trail of who did what beyond the source
-  address in the logs.
+- Authentication is a single local admin. There is no federated auth and no
+  multi-user support. The audit journal records what the daemon did, not
+  which operator asked for it; attribution beyond the source address in the
+  logs is not available with one shared account.
 - There is no rate limiting on endpoints other than login.
 - The `exec` transport runs configured commands through `sh -c` by design.
   Anyone who can write the configuration file can already specify what gets

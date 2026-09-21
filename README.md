@@ -164,13 +164,29 @@ threatened -- losing a sensor never starts a shutdown. Set
 - **Canarium terminates no TLS of its own.** Put it behind a reverse proxy
   (Traefik, nginx, Caddy) for HTTPS, and set
   `canarium.auth.trust_proxy_headers: true` so session cookies are marked
-  `Secure`. The shipped compose file binds the API to localhost.
+  `Secure`. Forwarded headers are honoured only from a trusted peer —
+  loopback and the private ranges by default:
+
+  ```yaml
+  canarium:
+    auth:
+      trust_proxy_headers: true
+      trusted_proxies: [10.0.0.8/32]   # narrow it to your proxy
+  ```
+
+  A request from anywhere else is treated as direct, so nobody can forge
+  their own source address by sending `X-Forwarded-For`. The shipped compose
+  file binds the API to localhost.
 
 - **API tokens** carry a scope: `read` can observe, `admin` can arm the
   executor and abort sequences. Give monitoring a read token.
 
-- **Auth is a single local admin.** Federated auth (OIDC, LDAP) is not
-  implemented.
+- **Auth is a single local admin**, rotatable from Settings. Federated auth
+  (OIDC, LDAP) is not implemented.
+
+- **Every finished sequence writes a JSONL audit journal** to `journal/` in
+  the data directory: what ran, what was dispatched, what came back, and the
+  addresses as they were before anything went down.
 
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.
 
