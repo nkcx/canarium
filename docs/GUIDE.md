@@ -488,6 +488,22 @@ PONR must be explicitly marked — Canarium does not infer it.
 
 ### Wake
 
+**Always set a gate.** The gate is the condition that has to hold before anything is woken, and leaving it out is the one mistake in this file that makes things actively worse:
+
+```yaml
+wake:
+  gate:
+    condition: and
+    conditions:
+      - {condition: state, fact: rack_ups.status, contains: OL}
+      - {condition: numeric, fact: rack_ups.battery.charge, above: 60}
+    for: 5m
+```
+
+Without it, clients are woken the instant the shutdown finishes — while the thing that triggered the shutdown is almost certainly still true, because nothing has had time to recover. So the plan triggers again, shuts everything down again, and repeats, pulling the whole fleet's boot current from the battery on every cycle. Canarium would flatten the UPS faster than leaving the machines running.
+
+`canarium validate` warns when a plan has no gate. If you genuinely want an immediate wake, write `gate: "true"` to say so.
+
 ```yaml
 wake:
   gate:
@@ -576,6 +592,15 @@ conditions:
 ### Dwell (for:)
 
 Every condition type supports `for:` — a duration the condition must remain true before it fires. This is critical for wake gates ("battery above 60% for 5 minutes") and trigger debouncing ("on battery for 30 seconds").
+
+### Shorthand
+
+Anywhere a condition is accepted, a bare string works too. `"true"` and `"false"` are the literal conditions; anything else is read as a template expression:
+
+```yaml
+when: "true"                                    # unconditional
+when: 'fact("rack_ups.battery.charge") < 50'    # same as condition: template
+```
 
 ### Template expressions
 

@@ -315,6 +315,7 @@ func validatePlans(cfg *Config, result *ValidationResult, reg *Registry) {
 
 		validatePostShutdown(p.Name, p.Shutdown.PostShutdown, result)
 
+		warnIfWakeGateMissing(p, result)
 		validateConditionConfig(&p.Wake.Gate, fmt.Sprintf("plan %q wake gate", p.Name), result, reg)
 
 		for i, s := range p.Wake.Stages {
@@ -599,6 +600,51 @@ func warnIfBudgetTooShortToVerify(c ClientConfig, result *ValidationResult) {
 			"guard period before being woken. Consider at least %s.",
 			c.Name, budget, minVerifiableBudget)
 	}
+}
+
+// warnIfWakeGateMissing flags a plan that will wake the fleet the instant
+// its shutdown finishes.
+//
+// An unspecified gate infers the literal "true" condition, which is the
+// right default for a stage entry condition and the wrong one here. The
+// result is a loop: the sequence finishes, everything wakes, the trigger
+// that caused the shutdown is still true because nothing has recovered
+// yet, and the plan fires again. Each cycle draws the boot-time current of
+// the whole fleet from a battery that is already why the shutdown
+// happened. Canarium would flatten the UPS faster than leaving the
+// machines running.
+//
+// The gate is what breaks the loop -- "mains back and battery above 60%
+// for five minutes" cannot be true while the trigger still is. So a plan
+// without one is almost certainly an omission rather than an intent.
+//
+// A warning rather than an error: waking immediately is a coherent thing
+// to ask for if the trigger cannot still hold by the time the shutdown
+// completes, and failing an existing deployment's config on upgrade is
+// worse than telling its operator to look.
+func warnIfWakeGateMissing(p PlanConfig, result *ValidationResult) {
+	if !isZeroCondition(p.Wake.Gate) {
+		return
+	}
+
+	result.AddWarning("plan %q: no wake gate. Clients will be woken as soon as "+
+		"the shutdown finishes, while whatever triggered it is most likely "+
+		"still true -- so the plan will trigger again, shut everything down "+
+		"again, and repeat, draining the battery faster than doing nothing. "+
+		"Set wake.gate to the recovery condition, for example mains restored "+
+		"and battery above 60%% for 5m. Write gate: \"true\" to say you "+
+		"really do mean immediately.", p.Name)
+}
+
+// isZeroCondition reports whether a condition was left unspecified.
+//
+// Distinguishable from an explicit `condition: "true"`, which is how an
+// operator says they really do mean unconditional.
+func isZeroCondition(c ConditionConfig) bool {
+	return c.Condition == "" && c.Fact == "" && c.Value == "" &&
+		c.Above == nil && c.Below == nil && c.Equals == nil &&
+		c.Is == "" && c.IsNot == "" && c.Contains == "" &&
+		c.For == "" && len(c.In) == 0 && len(c.Conditions) == 0
 }
 
 // checkDuration validates a configured duration.
