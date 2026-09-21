@@ -113,6 +113,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tag names, derived from what is being built.
+      #
+      # The previous set was :latest plus :<sha> and nothing else, so a
+      # release tag produced no version anyone could pin to -- the only way
+      # to ask for 0.1.0 specifically would have been to know its commit
+      # hash. A release nobody can name is not much of a release.
+      #
+      # :latest now follows releases rather than the tip of main, which is
+      # what the compose file and the README have always implied it meant.
+      # Main still publishes, as :main, for anyone who wants the edge.
+      - name: Image metadata
+        id: meta
+        if: env.PUBLISH == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long
+
       # On a branch: build for one architecture and throw the result away.
       # That still proves the Dockerfile works against these sources, which
       # is what a branch needs to know, without spending twenty minutes
@@ -136,10 +160,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
+          # meta.outputs.version is the release number on a tag build and
+          # the branch name otherwise, so `canarium --version` reports
+          # something a human recognises rather than a commit hash.
           build-args: |
-            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

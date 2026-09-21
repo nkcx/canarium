@@ -54,7 +54,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM alpine:3.21
+# Pinned to the series, not a patch: a rebuild should pick up security
+# fixes without waiting for someone to notice and bump a third digit.
+FROM alpine:3.24
 
 # ca-certificates: transports talk to HTTPS APIs (Proxmox, TrueNAS, OPNsense)
 # and must be able to verify their certificates.
