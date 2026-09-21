@@ -29,7 +29,7 @@ NUT monitors your UPS. Commercial suites are vendor-locked. Homelab scripts don'
 - **Safety first** -- stale or unknown facts never satisfy a condition, so losing contact with a sensor cannot trigger a shutdown; three operating modes (disarmed, dry-run, armed) so you can watch before you trust
 - **Simulation** -- replay scripted outage timelines against your plans without touching anything real, including which hosts *wouldn't* get shut down
 - **Preflight** -- `canarium doctor` contacts everything your config names, so a bad credential surfaces on a Tuesday rather than during an outage
-- **Web UI** -- see what's happening, what would happen, and what did happen
+- **Web UI** -- see what's happening, what would happen, and what did happen. Built for the case it's actually used in: read on a phone, in the dark, while the battery drains. Runtime remaining leads the page; everything else is arranged behind it
 - **Runs anywhere** -- single Go binary with embedded UI, targets a Raspberry Pi 3 with a 128 MB memory ceiling
 
 ## Quick start

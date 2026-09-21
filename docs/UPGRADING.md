@@ -323,3 +323,34 @@ And warns on:
 
 If validation now fails on a config that used to pass, it is reporting
 something that was already not doing what it looked like it was doing.
+
+---
+
+## Changed: what `:latest` points at
+
+`ghcr.io/nkcx/canarium:latest` used to move with every commit to `main`, so
+a `docker compose pull` could bring in unreleased work. It now follows
+releases.
+
+If you were relying on the old behaviour, `:main` does what `:latest` used
+to. If you were not, you were running unreleased commits without meaning
+to, and this fixes it.
+
+Version tags are the better answer either way:
+
+| Tag | Moves |
+|---|---|
+| `0.1.1` | Never. Pin this for anything you care about. |
+| `0.1` | With each patch release in the 0.1 series. |
+| `latest` | With each release. |
+| `main` | With every commit to `main`. Unreleased; expect breakage. |
+
+The shipped `compose.yaml` now pins a version rather than floating. This is
+the thing that shuts your fleet down; an unattended pull should not be able
+to change its behaviour.
+
+Images also carry an SBOM and signed build provenance now:
+
+```bash
+gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.1 --repo nkcx/canarium
+```
