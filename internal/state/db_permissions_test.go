@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,83 @@ func TestConcurrentWritesDoNotFail(t *testing.T) {
 		if err := <-errs; err != nil {
 			t.Errorf("concurrent write %d failed: %v", i, err)
 		}
+	}
+}
+
+// TestExistingLooseDataDirIsReported: MkdirAll leaves an existing
+// directory's mode alone, so a data directory created by a deployment script
+// or a bind mount can be world-readable while holding the password hash,
+// session tokens and learned SSH host keys.
+func TestExistingLooseDataDirIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permissions are not meaningful")
+	}
+
+	dir := filepath.Join(t.TempDir(), "loose")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("creating dir: %v", err)
+	}
+
+	DataDirWarning = ""
+	db, err := Open(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	if DataDirWarning == "" {
+		t.Error("a world-readable data directory produced no warning")
+	}
+	if !strings.Contains(DataDirWarning, "chmod") {
+		t.Errorf("the warning does not say how to fix it: %q", DataDirWarning)
+	}
+}
+
+func TestTightDataDirProducesNoWarning(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tight")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("creating dir: %v", err)
+	}
+
+	DataDirWarning = ""
+	db, err := Open(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	if DataDirWarning != "" {
+		t.Errorf("a 0700 data directory produced a warning: %q", DataDirWarning)
+	}
+}
+
+func TestCheckDataDirPermissions(t *testing.T) {
+	tests := []struct {
+		mode     os.FileMode
+		wantWarn bool
+	}{
+		{0o700, false},
+		{0o750, true},
+		{0o755, true},
+		{0o777, true},
+		{0o600, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode.String(), func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "d")
+			if err := os.Mkdir(dir, tt.mode); err != nil {
+				t.Fatalf("creating dir: %v", err)
+			}
+			// Mkdir is subject to umask; set the mode explicitly.
+			if err := os.Chmod(dir, tt.mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+
+			warning := checkDataDirPermissions(dir)
+			if (warning != "") != tt.wantWarn {
+				t.Errorf("mode %04o: warning=%q, wantWarn=%v", tt.mode, warning, tt.wantWarn)
+			}
+		})
 	}
 }

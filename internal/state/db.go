@@ -39,6 +39,14 @@ func Open(ctx context.Context, dataDir string) (*DB, error) {
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
 
+	// MkdirAll leaves an existing directory's permissions alone, so a data
+	// directory created by a deployment script or a bind mount may be world
+	// readable. Tightening it silently could break a deliberately shared
+	// setup, so report it and let the operator decide.
+	if warning := checkDataDirPermissions(dataDir); warning != "" {
+		DataDirWarning = warning
+	}
+
 	dbPath := filepath.Join(dataDir, "state.db")
 	dsn := dbPath + "?" + strings.Join([]string{
 		"_pragma=journal_mode(WAL)",
@@ -85,6 +93,33 @@ func Open(ctx context.Context, dataDir string) (*DB, error) {
 	}
 
 	return &DB{db: db}, nil
+}
+
+// DataDirWarning holds a permissions concern found during Open, if any.
+//
+// A package-level value rather than a returned error because it must not
+// prevent the daemon starting: the database itself is created 0600
+// regardless, and refusing to run over a directory mode would be a worse
+// outcome than saying so.
+var DataDirWarning string
+
+// checkDataDirPermissions reports a data directory readable beyond its owner.
+func checkDataDirPermissions(dataDir string) string {
+	info, err := os.Stat(dataDir)
+	if err != nil {
+		return ""
+	}
+
+	perm := info.Mode().Perm()
+	if perm&0o077 == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"data directory %s is mode %04o, readable beyond its owner; "+
+			"it holds the admin password hash, session tokens and learned SSH "+
+			"host keys. Run: chmod 0700 %s",
+		dataDir, perm, dataDir)
 }
 
 func (d *DB) Close() error {

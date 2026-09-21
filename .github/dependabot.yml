@@ -1,0 +1,35 @@
+# Dependency updates.
+#
+# Canarium holds credentials to an entire fleet and is expected to run
+# unattended for months, so a dependency advisory can sit unnoticed for a long
+# time. These raise a PR instead, and CI runs govulncheck and npm audit on it.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Patch bumps rarely need individual review; batching keeps the noise
+      # proportional to the risk.
+      go-patch:
+        update-types: [patch]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

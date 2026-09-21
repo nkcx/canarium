@@ -41,20 +41,28 @@ func (t *Transport) Execute(ctx context.Context, client *engine.Client, action e
 	}
 	defer conn.Close()
 
-	// Bound the whole exchange by the caller's deadline rather than the
-	// per-call read deadline alone.
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(deadline)
-		_ = conn.SetWriteDeadline(deadline)
-	}
+	// Close the connection when the caller's context ends, which unblocks
+	// the read in callRPC. gorilla's ReadJSON has no context of its own, so
+	// a server that accepts the connection and then goes silent would
+	// otherwise hold this goroutine for the full read deadline regardless of
+	// what the caller asked for.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 
-	if err := t.authenticate(conn, client); err != nil {
+	if err := t.authenticate(ctx, conn, client); err != nil {
 		// The error may quote the request, which carries the API key.
 		return nil, fmt.Errorf("authentication failed: %s",
 			netutil.RedactSecrets(err.Error(), client.Credentials))
 	}
 
-	result, err := t.callRPC(conn, "system.shutdown", map[string]any{
+	result, err := t.callRPC(ctx, conn, "system.shutdown", map[string]any{
 		"delay": 0,
 	})
 	if err != nil {
@@ -136,6 +144,11 @@ func (t *Transport) connect(ctx context.Context, client *engine.Client) (*websoc
 	url := netutil.URL(scheme, client.Address, port, "/api/current")
 
 	conn, resp, err := dialer.DialContext(ctx, url, nil)
+	if resp != nil {
+		// A failed upgrade returns the HTTP response, whose body holds the
+		// server's explanation and must be released either way.
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		status := ""
 		if resp != nil {
@@ -147,8 +160,8 @@ func (t *Transport) connect(ctx context.Context, client *engine.Client) (*websoc
 	return conn, nil
 }
 
-func (t *Transport) authenticate(conn *websocket.Conn, client *engine.Client) error {
-	result, err := t.callRPC(conn, "auth.login_with_api_key", []any{client.Credentials})
+func (t *Transport) authenticate(ctx context.Context, conn *websocket.Conn, client *engine.Client) error {
+	result, err := t.callRPC(ctx, conn, "auth.login_with_api_key", []any{client.Credentials})
 	if err != nil {
 		return err
 	}
@@ -165,9 +178,13 @@ func (t *Transport) authenticate(conn *websocket.Conn, client *engine.Client) er
 	return fmt.Errorf("unexpected auth response: %v", result)
 }
 
+// rpcTimeout bounds a single JSON-RPC exchange when the caller sets no
+// deadline of its own.
+const rpcTimeout = 30 * time.Second
+
 var rpcID atomic.Int64
 
-func (t *Transport) callRPC(conn *websocket.Conn, method string, params any) (any, error) {
+func (t *Transport) callRPC(ctx context.Context, conn *websocket.Conn, method string, params any) (any, error) {
 	id := rpcID.Add(1)
 
 	msg := map[string]any{
@@ -181,12 +198,25 @@ func (t *Transport) callRPC(conn *websocket.Conn, method string, params any) (an
 		return nil, fmt.Errorf("writing RPC: %w", err)
 	}
 
+	// The caller's deadline wins when it is sooner. An earlier version set a
+	// flat 30s here, which silently overrode whatever the executor's budget
+	// had asked for.
+	deadline := time.Now().Add(rpcTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
 	// Best effort: a failure here surfaces as the read below timing out.
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetReadDeadline(deadline)
+	_ = conn.SetWriteDeadline(deadline)
 
 	for {
 		var resp map[string]any
 		if err := conn.ReadJSON(&resp); err != nil {
+			// A cancelled context closes the connection out from under the
+			// read; report that as the cancellation it is.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("RPC %s: %w", method, ctxErr)
+			}
 			return nil, fmt.Errorf("reading RPC response: %w", err)
 		}
 
