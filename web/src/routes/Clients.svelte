@@ -1,18 +1,20 @@
 <script>
   import { clients, loading } from '../lib/stores/api.js';
+  import { route, navigate } from '../lib/router.js';
   import { stateLabel, stateTone, stateNote } from '../lib/events.js';
   import Card from '../lib/components/Card.svelte';
   import Chip from '../lib/components/Chip.svelte';
   import StatusDot from '../lib/components/StatusDot.svelte';
 
-  let selected = null;
-
+  // The selection lives in the URL, so a particular client can be linked
+  // to and the back button steps out of it.
+  $: selected = $route.param;
   $: current = $clients.find(c => c.name === selected) ?? null;
 
   // On a phone the list and the detail cannot sit side by side, so picking
   // a client replaces the list and a back control returns to it.
   function back() {
-    selected = null;
+    navigate('clients');
   }
 </script>
 
@@ -48,7 +50,7 @@
               ? 'bg-surface-100 border-l-canary'
               : 'border-l-transparent hover:bg-surface-50'}"
           aria-current={selected === client.name ? 'true' : undefined}
-          onclick={() => (selected = client.name)}
+          onclick={() => navigate('clients', client.name)}
         >
           <span class="flex items-center gap-2">
             <StatusDot tone={stateTone(client.state)} />

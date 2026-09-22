@@ -17,8 +17,8 @@
   import Login from './routes/Login.svelte';
   import Chip from './lib/components/Chip.svelte';
   import StatusDot from './lib/components/StatusDot.svelte';
+  import { route, navigate, normalise, titleFor } from './lib/router.js';
 
-  let currentView = 'dashboard';
   let navOpen = false;
   let pollTimer = null;
 
@@ -56,8 +56,17 @@
   // cleanup function and the interval was never cleared.
   onMount(() => {
     checkAuth();
+    normalise();
     return stopSession;
   });
+
+  // The address bar is the state of the app: which view is showing, and
+  // which client. Reloads and the back button follow it, and a link to
+  // what you are looking at can be sent to someone else.
+  $: currentView = $route.view;
+  $: if (typeof document !== 'undefined') {
+    document.title = titleFor($route.view, $route.param);
+  }
 
   // Start polling when authentication is established, and stop when it is
   // lost — including when a request 401s because the session expired.
@@ -68,7 +77,7 @@
   }
 
   function go(view) {
-    currentView = view;
+    navigate(view);
     navOpen = false;
   }
 
