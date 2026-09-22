@@ -276,3 +276,60 @@ func TestPlansDoNotDisturbDwellTimers(t *testing.T) {
 		t.Errorf("trigger dwell = %+v; viewing the page started a timer", d)
 	}
 }
+
+// TestClientsReportTheMACAndWhereItCameFrom: a discovered address is only
+// trustworthy if an operator can see it and see how fresh it is. Without
+// this the only evidence discovery had worked was a log line.
+func TestClientsReportTheMACAndWhereItCameFrom(t *testing.T) {
+	cfg := &config.Config{
+		Clients: []config.ClientConfig{
+			{Name: "fixed", Transport: "ssh", Address: "10.0.0.1", MAC: "11:22:33:44:55:66"},
+			{Name: "learned", Transport: "ssh", Address: "10.0.0.2"},
+			{Name: "unknown", Transport: "ssh", Address: "10.0.0.3"},
+		},
+	}
+	s := newServerWith(t, cfg, facts.NewStore())
+
+	confirmed := time.Now().Add(-90 * time.Second)
+	if err := s.db.SaveLearnedMAC(t.Context(), state.LearnedMAC{
+		Client: "learned", MAC: "aa:bb:cc:00:00:01", Source: "the truenas API",
+		LearnedAt: confirmed.Add(-time.Hour), ConfirmedAt: confirmed,
+	}); err != nil {
+		t.Fatalf("SaveLearnedMAC: %v", err)
+	}
+	if err := s.executor.ReloadLearnedMACs(); err != nil {
+		t.Fatalf("restoring: %v", err)
+	}
+
+	var clients []struct {
+		Name           string     `json:"name"`
+		MAC            string     `json:"mac"`
+		MACSource      string     `json:"mac_source"`
+		MACConfirmedAt *time.Time `json:"mac_confirmed_at"`
+	}
+	getJSON(t, s, "/api/clients", &clients)
+
+	byName := map[string]int{}
+	for i, c := range clients {
+		byName[c.Name] = i
+	}
+
+	if c := clients[byName["fixed"]]; c.MAC != "11:22:33:44:55:66" || c.MACSource != "configured" {
+		t.Errorf("configured client: mac=%q source=%q", c.MAC, c.MACSource)
+	}
+
+	c := clients[byName["learned"]]
+	if c.MAC != "aa:bb:cc:00:00:01" {
+		t.Errorf("learned client: mac=%q", c.MAC)
+	}
+	if c.MACSource != "the truenas API" {
+		t.Errorf("learned client: source=%q, want where it came from", c.MACSource)
+	}
+	if c.MACConfirmedAt == nil {
+		t.Error("learned client: no confirmation time, so staleness is invisible")
+	}
+
+	if c := clients[byName["unknown"]]; c.MAC != "" || c.MACSource != "" {
+		t.Errorf("unknown client reported mac=%q source=%q", c.MAC, c.MACSource)
+	}
+}

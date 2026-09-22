@@ -472,3 +472,41 @@ it must pass everything through to the daemon rather than only `/` and
 `/api`. The daemon serves the interface for any path it does not otherwise
 handle, which is what makes deep links and reloads work. The shipped Traefik
 labels already do this.
+
+---
+
+## Changed: MAC discovery is continuous
+
+0.1.3 discovered a client's hardware address once, at sequence start. That
+is the worst possible moment to be finding out: the fleet is about to go
+down, and anything that fails to answer stays unknown for the whole outage.
+
+Discovery now runs from the probe loop, whenever a client is up, and
+Canarium keeps the most recent good answer.
+
+| | |
+|---|---|
+| Known address | re-confirmed every 6 hours |
+| Unknown address | retried every 5 minutes |
+| During a sequence | never — the addresses were pinned at the start |
+| Configured `mac:` | never looked up at all |
+
+What is learned is stored in the database (schema version 8, applied
+automatically) and survives a restart, which matters because the likeliest
+time to restart is right after the power event, with the fleet down and
+nothing able to report its own address.
+
+**Bad data never displaces good data.** An address that is unparseable, all
+zeroes, broadcast or multicast cannot wake anything, so it is discarded and
+the last good value stands. So does a failed lookup or an appliance that has
+stopped answering. A genuinely changed address — a replaced NIC — is
+accepted and logged at warning level, because it is worth knowing about.
+
+`GET /api/clients` now reports `mac`, `mac_source` (`configured`, or where
+it was discovered) and `mac_confirmed_at`, and the Clients page shows them.
+A client with no address at all says so, rather than looking fine until a
+wake fails.
+
+Nothing is required of you, and a configured `mac:` still wins over
+everything. It remains the most reliable option and is still what the guide
+recommends — this is here so that nobody is dependent on it.

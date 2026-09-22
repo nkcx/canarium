@@ -363,6 +363,15 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		WakePolicy  string   `json:"wake_policy"`
 		DependsOn   []string `json:"depends_on"`
 		State       string   `json:"state"`
+
+		// MAC is the address wake-on-LAN would use, wherever it came
+		// from, with MACSource saying which: "configured" for a value
+		// from the config file, otherwise where it was discovered.
+		// MACConfirmedAt is when a discovered value was last checked,
+		// so a stale one is visible as stale.
+		MAC            string     `json:"mac,omitempty"`
+		MACSource      string     `json:"mac_source,omitempty"`
+		MACConfirmedAt *time.Time `json:"mac_confirmed_at,omitempty"`
 	}
 
 	// An empty list, not null. With `clients: []` this returned null, so
@@ -370,7 +379,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	// deployment is most likely to have.
 	clients := make([]clientInfo, 0, len(s.cfg.Clients))
 	for _, c := range s.cfg.Clients {
-		clients = append(clients, clientInfo{
+		info := clientInfo{
 			Name:        c.Name,
 			Description: c.Description,
 			Transport:   c.Transport,
@@ -381,7 +390,19 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 			WakePolicy:  c.WakePolicy,
 			DependsOn:   c.DependsOn,
 			State:       s.executor.GetClientState(c.Name).String(),
-		})
+		}
+
+		if info.MAC = s.executor.MACFor(&c); info.MAC != "" {
+			if learned, ok := s.executor.LearnedMAC(c.Name); ok && learned.MAC == info.MAC {
+				info.MACSource = learned.Source
+				confirmed := learned.ConfirmedAt
+				info.MACConfirmedAt = &confirmed
+			} else {
+				info.MACSource = "configured"
+			}
+		}
+
+		clients = append(clients, info)
 	}
 	s.writeJSON(w, http.StatusOK, clients)
 }

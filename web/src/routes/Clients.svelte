@@ -1,6 +1,7 @@
 <script>
   import { clients, loading } from '../lib/stores/api.js';
   import { route, navigate } from '../lib/router.js';
+  import { timeAgo } from '../lib/facts.js';
   import { stateLabel, stateTone, stateNote } from '../lib/events.js';
   import Card from '../lib/components/Card.svelte';
   import Chip from '../lib/components/Chip.svelte';
@@ -104,6 +105,30 @@
                 </dt>
                 <dd class="text-ink tabular-nums break-all">{current.address || '—'}</dd>
               </div>
+              <div class="col-span-2">
+                <dt class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1">
+                  MAC ADDRESS
+                </dt>
+                <dd class="text-ink tabular-nums">
+                  {current.mac || '—'}
+                  {#if current.mac_source}
+                    <span class="block text-meta text-ink-muted">
+                      {#if current.mac_source === 'configured'}
+                        from the configuration file
+                      {:else}
+                        discovered from {current.mac_source}{#if current.mac_confirmed_at},
+                          confirmed {timeAgo(current.mac_confirmed_at)}{/if}
+                      {/if}
+                    </span>
+                  {:else}
+                    <span class="block text-meta text-warn">
+                      Not known. Wake-on-LAN cannot run until this is set in the
+                      configuration or discovered from the device.
+                    </span>
+                  {/if}
+                </dd>
+              </div>
+
               <div>
                 <dt class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1">
                   FEED POLICY

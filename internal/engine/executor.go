@@ -125,6 +125,15 @@ type Executor struct {
 	// rather than on every policy tick. Guarded by mu.
 	wouldTrigger map[string]bool
 
+	// learnedMACs holds hardware addresses discovered from the devices
+	// themselves, for clients whose config does not carry one. Loaded at
+	// startup and refreshed by the probe loop. Guarded by mu.
+	learnedMACs map[string]state.LearnedMAC
+
+	// macAttempts is when each client was last asked, so an appliance is
+	// not queried on every probe tick. Guarded by mu.
+	macAttempts map[string]time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -445,6 +454,12 @@ func (e *Executor) restoreState() error {
 			"clients", orphaned)
 	}
 
+	if err := e.restoreLearnedMACs(); err != nil {
+		// Not fatal: discovery will fill these in again as clients are
+		// seen. Refusing to start over it would be worse.
+		e.logger.Error("restoring learned MAC addresses", "error", err)
+	}
+
 	seq, err := e.db.GetActiveSequence(e.ctx)
 	if err != nil {
 		return err
@@ -489,6 +504,7 @@ func (e *Executor) probeLoop() {
 			return
 		case <-ticker.C:
 			e.probeAllClients()
+			e.learnMACs()
 		}
 	}
 }

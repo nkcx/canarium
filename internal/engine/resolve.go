@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/nkcx/canarium/internal/config"
-	"github.com/nkcx/canarium/internal/netutil"
 	"github.com/nkcx/canarium/internal/state"
 )
 
@@ -90,12 +89,27 @@ func clientMAC(c *config.ClientConfig) string {
 // and wake-on-LAN failed with "no MAC address configured" for a client
 // whose MAC had been discovered minutes earlier.
 func (e *Executor) macFor(as *ActiveSequence, c *config.ClientConfig) string {
+	// A configured address is a deliberate statement and outranks anything
+	// discovered.
+	if mac := clientMAC(c); mac != "" {
+		return mac
+	}
+
+	// Then what this sequence pinned when it started, which is the state of
+	// the world at the moment the fleet was last whole.
 	if as != nil {
 		if pinned, ok := as.ResolvedAddr(c.Name); ok && pinned.MAC != "" {
 			return pinned.MAC
 		}
 	}
-	return clientMAC(c)
+
+	// Then the most recent good value the probe loop learned, which covers
+	// a client woken outside a sequence, and a sequence resumed after a
+	// restart that lost its snapshot.
+	if learned, ok := e.LearnedMAC(c.Name); ok {
+		return learned.MAC
+	}
+	return ""
 }
 
 // addressFor returns the address to use for a client during a sequence,
@@ -119,45 +133,21 @@ const discoverMACTimeout = 10 * time.Second
 
 // discoverMAC finds a client's hardware address when the config omits it.
 //
-// Two sources, in order of how much they can be trusted:
-//
-//  1. The device itself, through its transport, for the transports whose
-//     APIs report interface details. The device knows its own hardware and
-//     the answer holds across subnets.
-//
-//  2. The kernel's neighbour table, which is a cache of what recently
-//     answered on the local segment -- useful, but only for a host on a
-//     directly attached subnet, and not at all from inside a container on
-//     a bridge network.
-//
-// This runs at sequence start, while the fleet is still up, which is the
-// only moment the question can be asked at all: once a host is off, nothing
-// can report its MAC, and WOL is precisely what needs it.
+// The probe loop has normally learned this already, while the fleet was
+// healthy, so the usual path is a cache hit with no network traffic at all.
+// Falling back to a live lookup covers the client that has not been seen up
+// since this daemon started -- worth one attempt here, because a sequence
+// start is the last moment anything can be asked before the host goes down.
 func (e *Executor) discoverMAC(ctx context.Context, c *config.ClientConfig, ip string) string {
-	if d, ok := e.transports[c.Transport].(MACDiscoverer); ok {
-		discoverCtx, cancel := context.WithTimeout(ctx, discoverMACTimeout)
-		mac, err := d.DiscoverMAC(discoverCtx, e.buildClient(c))
-		cancel()
-
-		switch {
-		case err != nil:
-			e.logger.Info("could not ask the device for its MAC address",
-				"client", c.Name, "transport", c.Transport, "error", err)
-		case mac != "":
-			e.logger.Info("discovered client MAC address from its own API",
-				"client", c.Name, "transport", c.Transport, "mac", mac)
-			return mac
-		}
+	if learned, ok := e.LearnedMAC(c.Name); ok {
+		return learned.MAC
 	}
 
-	if ip == "" {
+	mac, source := e.lookUpMAC(ctx, c, ip)
+	if mac == "" {
 		return ""
 	}
-	if mac := netutil.NeighbourMAC(ip); mac != "" {
-		e.logger.Info("discovered client MAC address from the neighbour table",
-			"client", c.Name, "address", ip, "mac", mac)
-		return mac
-	}
 
-	return ""
+	e.recordLearnedMAC(c.Name, mac, source)
+	return mac
 }

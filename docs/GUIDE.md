@@ -201,14 +201,20 @@ clients:
 
 **`address`** — hostname or IP. At sequence start, Canarium resolves every hostname and snapshots the result, so wake doesn't depend on DNS still working — which it may not be, if the DNS server is on the same UPS.
 
-**`mac`** — needed for wake-on-LAN, and worth setting by hand: it's the one fact about a host that cannot be looked up once the host is off. If you omit it, Canarium tries to find it at sequence start, while the fleet is still up, and records what it finds in the same snapshot:
+**`mac`** — needed for wake-on-LAN, and worth setting by hand: it's the one fact about a host that cannot be looked up once the host is off. If you omit it, Canarium keeps looking it up in the background, whenever the client is up, and remembers the most recent good answer:
 
 1. **From the device itself**, for transports whose API reports interface details — `truenas` and `opnsense`. It picks the interface holding the client's address, so a box with several NICs gets the right one, and this works across VLANs. It needs the credentials the transport already uses.
 2. **From the kernel's neighbour table** (`/proc/net/arp`), which only knows hosts on a directly attached subnet. Inside a container on a Docker bridge network — which the shipped compose file uses — everything beyond the bridge is reached through the gateway, so this finds nothing. Host or macvlan networking makes it work.
 
 `proxmox` has no discovery: Proxmox's API does not expose the node's own MAC anywhere. Set `mac:` by hand for Proxmox nodes, or give Canarium host networking so the neighbour table can answer.
 
-Discovery is best-effort and never fails a sequence. If it finds nothing, wake-on-LAN reports "no MAC address configured" — during the recovery, which is the wrong time to learn it. Set `mac:` for anything you care about.
+Discovery runs from the probe loop, so it keeps up with reality rather than taking one reading: a known address is re-confirmed every six hours, and an unknown one is retried every five minutes until it is found. It never runs while a sequence is in progress. What it learns is written to the database, so it survives a restart — which matters, because the likeliest time to restart is straight after the power event, with the whole fleet down and nothing able to report its own address.
+
+Bad data is discarded rather than stored. An address that is unparseable, all zeroes, broadcast or multicast cannot wake anything, so it is ignored and the last good value stands. A failed lookup, or an appliance that has stopped answering, likewise changes nothing. An address that has genuinely changed — a replaced NIC — is accepted and logged.
+
+The Clients page shows each client's address, where it came from, and when it was last confirmed, so you can see whether discovery is working before you need it.
+
+Discovery is best-effort and never fails a sequence. If nothing is ever found, wake-on-LAN reports "no MAC address configured" — during the recovery, which is the wrong time to learn it. Set `mac:` for anything you care about; discovery exists so that nobody is *dependent* on having done so.
 
 **`shutdown_budget`** — how long to wait for the client to shut down. Also serves as the state transition timeout: if Canarium can't probe the client (e.g., the switch it's behind is already down), it records `down_unverified` after this duration.
 

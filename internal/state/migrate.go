@@ -173,6 +173,31 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(sequence_id, status)`,
 		},
 	},
+	{
+		version: 8,
+		name:    "learned MAC addresses",
+		stmts: []string{
+			// Hardware addresses discovered from the devices themselves.
+			//
+			// This has to outlive the process. A MAC can only be learned
+			// from a host that is up, and the moment it is needed -- waking
+			// a fleet after an outage -- every host is down. A daemon that
+			// forgot on restart would be at its most ignorant exactly when
+			// a restart is most likely: after the power event it exists to
+			// handle.
+			//
+			// learned_at is when this address was first seen, confirmed_at
+			// when it was last checked, so an operator can tell a value
+			// re-confirmed minutes ago from one last seen in March.
+			`CREATE TABLE IF NOT EXISTS learned_macs (
+				client_name  TEXT PRIMARY KEY,
+				mac          TEXT NOT NULL,
+				source       TEXT NOT NULL,
+				learned_at   TEXT NOT NULL,
+				confirmed_at TEXT NOT NULL
+			)`,
+		},
+	},
 }
 
 // migrate brings the database up to the latest schema version.
