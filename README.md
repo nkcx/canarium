@@ -101,7 +101,7 @@ docker run -d \
   -p 8420:8420 \
   -v ./canarium.yaml:/etc/canarium/config.yaml \
   -v canarium-data:/var/lib/canarium \
-  ghcr.io/nkcx/canarium:0.1.4
+  ghcr.io/nkcx/canarium:0.1.5
 ```
 
 ### Image tags
@@ -111,7 +111,7 @@ Images are published to `ghcr.io/nkcx/canarium` for `linux/amd64`,
 
 | Tag | Moves |
 |---|---|
-| `0.1.4` | Never. Pin this for anything you care about. |
+| `0.1.5` | Never. Pin this for anything you care about. |
 | `0.1` | With each patch release in the 0.1 series. |
 | `latest` | With each release. |
 | `main` | With every commit to `main`. Unreleased; expect breakage. |
@@ -121,7 +121,7 @@ establish it was built by this repository rather than by whoever last held
 a registry token:
 
 ```bash
-gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.4 --repo nkcx/canarium
+gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.5 --repo nkcx/canarium
 ```
 
 ## How it works
