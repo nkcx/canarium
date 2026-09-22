@@ -1,6 +1,6 @@
 <script>
   import {
-    status, clients, setMode, abortSequence, proceedStage, changePassword,
+    status, clients, plans, setMode, abortSequence, proceedStage, changePassword,
     minPasswordLength, passwordPinned, configReadonly,
   } from '../lib/stores/api.js';
   import { timeAgo } from '../lib/facts.js';
@@ -22,7 +22,7 @@
   const modes = [
     {
       id: 'disarmed', label: 'Disarmed', tone: 'neutral',
-      desc: 'Sources poll, conditions evaluate, nothing executes.',
+      desc: 'Sources poll and conditions evaluate. Reports what would have triggered; nothing executes.',
     },
     {
       id: 'dry-run', label: 'Dry Run', tone: 'info',
@@ -43,6 +43,12 @@
   $: runningClients = $clients.filter(
     c => c.state === 'up' || c.state === 'shutting_down',
   );
+
+  // Plans whose trigger condition holds right now, ignoring dwell. Arming
+  // restarts trigger timers, so these will not fire on the click itself,
+  // but they will fire once the condition has held for its `for:` -- and
+  // the operator should know that before pressing the button.
+  $: holdingTriggers = $plans.filter(p => p.trigger?.instant === 'true');
 
   function requestMode(mode) {
     if ($configReadonly) {
@@ -306,8 +312,22 @@
   <div class="max-w-2xl">
     <Card>
       <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-body">
+        <dt class="text-ink-muted">Version</dt>
+        <dd class="text-ink-secondary text-right tabular-nums">{$status?.version || '—'}</dd>
+
         <dt class="text-ink-muted">Config</dt>
-        <dd class="text-ink-secondary text-right">File-canonical (YAML)</dd>
+        <dd class="text-right">
+          <span class="text-ink-secondary">File-canonical (YAML)</span>
+          {#if ($status?.config_warnings ?? []).length}
+            <span class="block text-meta text-warn">
+              {$status.config_warnings.length}
+              {$status.config_warnings.length === 1 ? 'warning' : 'warnings'} at startup —
+              see the dashboard
+            </span>
+          {:else}
+            <span class="block text-meta text-ok">validated clean</span>
+          {/if}
+        </dd>
 
         <dt class="text-ink-muted">Auth</dt>
         <dd class="text-ink-secondary text-right">
@@ -335,6 +355,14 @@
     Plans will trigger on their conditions and shut down real machines,
     without asking again.
   </p>
+  {#if holdingTriggers.length > 0}
+    <p class="text-warn">
+      {#each holdingTriggers as p, i (p.name)}{i > 0 ? ', ' : ''}<span class="font-bold">{p.name}</span>{/each}:
+      the trigger holds right now. Arming restarts its timer, so it will start
+      once the condition has held again{holdingTriggers[0].trigger?.for ? ` for ${holdingTriggers[0].trigger.for}` : ''}
+      — unless conditions change first.
+    </p>
+  {/if}
   {#if runningClients.length > 0}
     <p class="text-ink-muted">
       {runningClients.length}

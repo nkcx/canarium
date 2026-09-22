@@ -298,6 +298,7 @@ const REFRESH_TRIGGERING_EVENTS = new Set([
   'client_state_changed',
   'mode_changed',
   'trigger',
+  'would_trigger',
   'abort',
   'ponr_crossed',
   'stage_start',

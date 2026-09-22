@@ -624,6 +624,10 @@ Facts are accessed via `fact("key")`, which returns the value or `nil` if unavai
 
 Canarium starts in **disarmed** mode. Sources poll, conditions evaluate, everything is logged, but nothing executes. This lets you verify that facts are flowing and conditions evaluate as expected.
 
+If a plan's trigger holds while disarmed, Canarium logs it and puts *Plan "outage" would have triggered — disarmed, so nothing was done* in the event log, once per episode. That line is the thing to watch for: a real outage while disarmed tells you whether the plan would have fired, without anything being shut down. The Plans page shows every condition's live evaluation, including how far through its `for:` a trigger is.
+
+Arming restarts every trigger's `for:` timer. Without that, arming in the middle of an outage whose trigger had already held long enough would start the sequence on the next tick — the click that arms would also be the click that shuts machines down. If a trigger holds when you arm, the confirmation says so, and the plan starts once the condition has held again for its full `for:`.
+
 Switch to **dry-run** to test the full sequence with real timing — transports log what they would do instead of acting.
 
 Switch to **armed** only when you're confident the configuration is correct.
@@ -730,7 +734,8 @@ canarium doctor -c config.yaml
 ### Shutdown not triggering
 
 - Check the mode: `disarmed` evaluates conditions but never executes
-- Check the trigger condition in the web UI — it shows the current evaluation state
+- Check the trigger on the Plans page — it shows each condition's live evaluation, the reading it decided on, and dwell progress. "Cannot be evaluated" means a fact it needs is not reporting
+- Check the stages resolve to clients: the Plans page flags any stage whose references match nothing
 - Check dwell: the condition must be true for the full `for:` duration
 - Check fact quality: `unknown` or `stale` facts never satisfy triggers
 

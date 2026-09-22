@@ -4,7 +4,7 @@
   } from '../lib/stores/api.js';
   import {
     formatValue, unitSuffix, timeAgo, qualityTone, sortFacts, primaryPower,
-    splitFactKey,
+    splitFactKey, sourceHealth, factStatus,
   } from '../lib/facts.js';
   import { describeEvent, stateLabel, stateTone, stateNote } from '../lib/events.js';
   import Section from '../lib/components/Section.svelte';
@@ -14,8 +14,17 @@
 
   $: seq = $status?.sequence ?? null;
   $: power = primaryPower($facts);
+  $: health = sourceHealth($facts);
   $: sortedFacts = sortFacts($facts);
-  $: staleFacts = sortedFacts.filter(([, f]) => f.quality !== 'good');
+
+  // Only readings that stopped, or whose whole source is silent. A reading
+  // the device simply does not provide is not a fault and never changes,
+  // and counting it here put a permanent amber warning on a healthy UPS.
+  $: problemFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) === 'problem');
+  $: shownFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) !== 'unsupported');
+  $: unsupportedFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) === 'unsupported');
+
+  $: warnings = $status?.config_warnings ?? [];
 
   /*
    * The headline answers the only two questions worth asking at 2am: how
@@ -79,6 +88,34 @@
           </p>
         </div>
       </div>
+    </Card>
+  </div>
+{/if}
+
+<!--
+  Validation warnings from startup. They were only ever logged, so on a
+  deployment whose every stage matched no client -- an outage would shut
+  nothing down -- the UI gave no hint.
+-->
+{#if warnings.length > 0}
+  <div class="mb-6">
+    <Card tone="warn">
+      <details>
+        <summary class="cursor-pointer text-body text-warn font-bold list-none flex items-center gap-2">
+          <StatusDot tone="warn" />
+          {warnings.length} configuration {warnings.length === 1 ? 'warning' : 'warnings'}
+          <span class="text-meta text-ink-muted font-normal">— show</span>
+        </summary>
+        <ul class="mt-3 space-y-1.5 text-meta text-ink-secondary list-disc pl-5">
+          {#each warnings as w, i (i)}
+            <li class="break-words">{w}</li>
+          {/each}
+        </ul>
+        <p class="text-meta text-ink-muted mt-3">
+          From <code>canarium validate</code> at startup. Fix them in the
+          configuration file and restart.
+        </p>
+      </details>
     </Card>
   </div>
 {/if}
@@ -263,9 +300,9 @@
 <!-- ── Why ────────────────────────────────────────────────────────── -->
 <Section title="FACTS" id="facts-heading">
   <span slot="aside" class="text-meta">
-    {#if staleFacts.length > 0}
+    {#if problemFacts.length > 0}
       <span class="text-warn">
-        {staleFacts.length} not reporting — conditions reading them cannot be satisfied
+        {problemFacts.length} not reporting — conditions reading them cannot be satisfied
       </span>
     {:else}
       <span class="text-ink-muted">all reporting</span>
@@ -288,7 +325,7 @@
     <!-- Reference density, deliberately quieter than the headline: these
          are the readings behind the number above, not a second focal point. -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
-      {#each sortedFacts as [key, fact] (key)}
+      {#each shownFacts as [key, fact] (key)}
         {@const parts = splitFactKey(key)}
         <div
           class="border rounded-[var(--radius-sm)] px-3 py-2.5 bg-surface-50
@@ -319,6 +356,16 @@
         </div>
       {/each}
     </div>
+  {/if}
+
+  {#if unsupportedFacts.length > 0}
+    <p class="text-meta text-ink-muted mt-3">
+      Not provided by this hardware:
+      {unsupportedFacts.map(([k]) => k).join(', ')}.
+      <span class="text-ink-faint">
+        The source is reporting, but has never sent these readings.
+      </span>
+    </p>
   {/if}
 </Section>
 

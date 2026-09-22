@@ -354,3 +354,36 @@ Images also carry an SBOM and signed build provenance now:
 ```bash
 gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.1 --repo nkcx/canarium
 ```
+
+---
+
+## Changed: disarmed mode now evaluates triggers
+
+Disarmed was documented as "sources poll, conditions evaluate, nothing
+executes", but the policy loop returned before evaluating anything unless
+the executor was armed or in dry-run. So the mode whose purpose is letting
+you verify your plans gave no signal at all when a real outage would have
+fired one.
+
+Triggers are now evaluated and timed while disarmed. Nothing executes. When
+a trigger holds, a `would_trigger` event is emitted and logged, once per
+episode.
+
+**Arming restarts trigger timers.** Because disarmed now times triggers,
+arming during an outage whose trigger had already held for its full `for:`
+would otherwise start the sequence immediately. Instead the trigger has to
+hold again, observed while armed. The cost is one dwell period; the arm
+confirmation tells you when a trigger is already holding.
+
+Webhook consumers will see the new `would_trigger` event type.
+
+---
+
+## Changed: API responses
+
+| Endpoint | Change |
+|---|---|
+| `GET /api/plans` | Now describes each plan in full: trigger, abort, stages (with resolved clients and any references that match nothing), post-shutdown, and wake gate, each condition with its live evaluation. `name` and `stages` (the count) are unchanged. |
+| `GET /api/status` | Adds `version` and `config_warnings`, the validation warnings from startup. Previously these were only logged. `clients` no longer includes clients removed from the configuration. |
+| `GET /api/clients`, `GET /api/plans` | Return `[]` rather than `null` when empty. |
+| `GET /api/facts` | `updated_at` is `null` for a fact that has never been reported, rather than `0001-01-01T00:00:00Z`. |

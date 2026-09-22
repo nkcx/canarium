@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  formatValue, formatSeconds, unitSuffix, qualityTone,
+  formatValue, formatSeconds, unitSuffix, unitSymbol, qualityTone, timeAgo,
   splitFactKey, factRank, sortFacts, primaryPower,
+  neverReported, sourceHealth, factStatus,
 } from './facts.js';
 
 const good = (value, extra = {}) => ({ value, quality: 'good', ...extra });
@@ -70,6 +71,18 @@ describe('unitSuffix', () => {
 
   it('appends a unit that would otherwise be lost', () => {
     expect(unitSuffix({ unit: 'V', type: 'number' })).toBe(' V');
+  });
+
+  it('uses symbols for the words NUT declares', () => {
+    // The dashboard rendered "120 volts" next to "76%".
+    expect(unitSuffix({ unit: 'volts', type: 'number' })).toBe(' V');
+    expect(unitSuffix({ unit: 'celsius', type: 'number' })).toBe('°C');
+    expect(unitSymbol('Watts')).toBe('W');
+    expect(unitSymbol('hertz')).toBe('Hz');
+  });
+
+  it('shows an unrecognised unit as declared rather than dropping it', () => {
+    expect(unitSymbol('furlongs')).toBe('furlongs');
   });
 
   it('copes with a fact that declares no unit', () => {
@@ -232,5 +245,75 @@ describe('primaryPower', () => {
   it('returns null when nothing describes power at all', () => {
     expect(primaryPower({})).toBeNull();
     expect(primaryPower({ 'temp.rack.celsius': good(27.5) })).toBeNull();
+  });
+});
+
+describe('timeAgo', () => {
+  it('says never for a fact that has never been reported', () => {
+    // The zero time rendered as "17757122h ago".
+    expect(timeAgo(null)).toBe('never');
+    expect(timeAgo(undefined)).toBe('never');
+    expect(timeAgo('0001-01-01T00:00:00Z')).toBe('never');
+    expect(timeAgo('not a date')).toBe('never');
+  });
+
+  it('describes recent times', () => {
+    expect(timeAgo(new Date().toISOString())).toBe('just now');
+    expect(timeAgo(new Date(Date.now() - 90_000).toISOString())).toBe('1m ago');
+  });
+});
+
+describe('unsupported readings vs readings that stopped', () => {
+  // The exact shape of the lembas deployment: an APC BR1500G that reports
+  // charge, runtime and voltages but has no temperature sensor and does
+  // not expose output voltage.
+  const lembas = {
+    'rack_ups.battery.charge': { value: 100, quality: 'good', updated_at: new Date().toISOString() },
+    'rack_ups.status': { value: ['OL'], quality: 'good', updated_at: new Date().toISOString() },
+    'rack_ups.output.voltage': { value: null, quality: 'unknown', updated_at: null },
+    'rack_ups.ups.temperature': { value: null, quality: 'unknown', updated_at: '0001-01-01T00:00:00Z' },
+  };
+
+  it('does not call a reading the hardware lacks a problem', () => {
+    // A healthy UPS showed a permanent amber "2 not reporting" warning
+    // about two readings it does not have.
+    const health = sourceHealth(lembas);
+    expect(health.rack_ups.reporting).toBe(true);
+    expect(factStatus('rack_ups.ups.temperature', lembas['rack_ups.ups.temperature'], health))
+      .toBe('unsupported');
+    expect(factStatus('rack_ups.output.voltage', lembas['rack_ups.output.voltage'], health))
+      .toBe('unsupported');
+  });
+
+  it('still calls a reading that went stale a problem', () => {
+    const facts = {
+      ...lembas,
+      'rack_ups.ups.load': { value: 76, quality: 'stale', updated_at: new Date(Date.now() - 600_000).toISOString() },
+    };
+    const health = sourceHealth(facts);
+    expect(factStatus('rack_ups.ups.load', facts['rack_ups.ups.load'], health)).toBe('problem');
+  });
+
+  it('calls everything a problem when the whole source is silent', () => {
+    // A source that never connected is the failure the warning exists for,
+    // and must not be mistaken for a device with few sensors.
+    const dead = {
+      'rack_ups.battery.charge': { value: null, quality: 'unknown', updated_at: null },
+      'rack_ups.status': { value: null, quality: 'unknown', updated_at: null },
+    };
+    const health = sourceHealth(dead);
+    expect(health.rack_ups.reporting).toBe(false);
+    expect(factStatus('rack_ups.status', dead['rack_ups.status'], health)).toBe('problem');
+  });
+
+  it('sorts unsupported readings to the end, not the front', () => {
+    const keys = sortFacts(lembas).map(([k]) => k);
+    expect(keys.slice(-2).sort()).toEqual(['rack_ups.output.voltage', 'rack_ups.ups.temperature']);
+    expect(keys[0]).not.toBe('rack_ups.output.voltage');
+  });
+
+  it('treats a false or zero value as reported', () => {
+    expect(neverReported({ value: 0, quality: 'good', updated_at: null })).toBe(false);
+    expect(neverReported({ value: false, quality: 'good', updated_at: null })).toBe(false);
   });
 });

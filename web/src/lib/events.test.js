@@ -8,6 +8,7 @@ describe('describeEvent', () => {
     // rather than a sentence.
     const cases = [
       ['trigger', 'outage', /Plan "outage" triggered/],
+      ['would_trigger', 'outage', /Plan "outage" would have triggered — disarmed/],
       ['abort', 'outage', /Sequence "outage" aborted/],
       ['ponr_crossed', 'compute', /Point of no return crossed at stage "compute"/],
       ['stage_start', 'compute', /Stage "compute" started/],

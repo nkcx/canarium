@@ -10,6 +10,12 @@
 /** Tones map to the colour contract in app.css. */
 const DESCRIPTIONS = {
   trigger: (d) => ({ tone: 'live', text: `Plan "${str(d)}" triggered` }),
+  // Disarmed mode evaluates and reports but never acts. This is the signal
+  // that mode exists to give: a real outage would have fired this plan.
+  would_trigger: (d) => ({
+    tone: 'warn',
+    text: `Plan "${str(d)}" would have triggered — disarmed, so nothing was done`,
+  }),
   abort: (d) => ({ tone: 'live', text: `Sequence "${str(d)}" aborted` }),
   ponr_crossed: (d) => ({
     tone: 'danger',
