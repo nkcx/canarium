@@ -75,8 +75,8 @@ Before trusting a pull, check it was built by this repository's workflow
 rather than by whoever last held a registry token:
 
 ```bash
-gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.1 --repo nkcx/canarium
-docker buildx imagetools inspect ghcr.io/nkcx/canarium:0.1.1 \
+gh attestation verify oci://ghcr.io/nkcx/canarium:0.1.2 --repo nkcx/canarium
+docker buildx imagetools inspect ghcr.io/nkcx/canarium:0.1.2 \
   --format '{{ json .SBOM }}'
 ```
 

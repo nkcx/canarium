@@ -18,7 +18,7 @@
 # Canarium — Product Specification
 
 **Version:** 0.3
-**Status:** Implemented as of v0.1.1, with the exceptions noted above
+**Status:** Implemented as of v0.1.2, with the exceptions noted above
 
 ---
 
@@ -133,7 +133,7 @@ Web UI: embedded SPA built with Svelte and Tailwind CSS, compiled into the Go bi
 
 Single process. Container image and native binary both first-class.
 
-Container images published to `ghcr.io/nkcx/canarium`, multi-arch (amd64, arm64, armv7), carrying an SBOM and signed build provenance. Version tags (`0.1.1`, `0.1`) are pinnable; `latest` follows releases and `main` follows the branch.
+Container images published to `ghcr.io/nkcx/canarium`, multi-arch (amd64, arm64, armv7), carrying an SBOM and signed build provenance. Version tags (`0.1.2`, `0.1`) are pinnable; `latest` follows releases and `main` follows the branch.
 
 Reference `compose.yaml` shipped in the repository:
 
@@ -143,7 +143,7 @@ services:
     # Pinned deliberately: this is the thing that shuts your fleet down,
     # and an unattended `docker compose pull` should not be able to change
     # its behaviour. Use :latest instead if you would rather track releases.
-    image: ghcr.io/nkcx/canarium:0.1.1
+    image: ghcr.io/nkcx/canarium:0.1.2
     ports:
       - "8420:8420"
     volumes:

@@ -72,3 +72,24 @@ milliseconds rather than minutes.
 
 One logical change per commit, with a message that explains what was wrong
 and why the fix is the right one. The existing history is the style guide.
+
+## Cutting a release
+
+Releases are the container image; there are no other artefacts. In order:
+
+1. Bump every pinned version reference to the new number **before**
+   tagging, so the tagged tree documents itself:
+   `grep -rn 'canarium:[0-9]' README.md SECURITY.md compose.yaml docs/SPEC.md`,
+   plus the status line at the top of `docs/SPEC.md`. `docs/UPGRADING.md`
+   keeps its old numbers — those sections describe the releases they name.
+2. Add a `docs/UPGRADING.md` section for anything that changes behaviour.
+3. `make check`, push to `main`, and wait for CI to go green.
+4. `git tag -a vX.Y.Z` and push the tag. CI publishes `X.Y.Z`, `X.Y` and
+   `latest`, with an SBOM and signed provenance.
+5. Confirm before announcing:
+   `gh attestation verify oci://ghcr.io/nkcx/canarium:X.Y.Z --repo nkcx/canarium`
+6. `gh release create`. Keep the notes honest about what has and has not
+   been tested against real hardware.
+
+Never move a published tag. If something was missed, fix it on `main` and
+cut the next patch release.

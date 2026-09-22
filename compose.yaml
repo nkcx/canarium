@@ -97,7 +97,7 @@ services:
     # Pinned deliberately: this is the thing that shuts your fleet down,
     # and an unattended `docker compose pull` should not be able to change
     # its behaviour. Use :latest instead if you would rather track releases.
-    image: ghcr.io/nkcx/canarium:0.1.1
+    image: ghcr.io/nkcx/canarium:0.1.2
     container_name: canarium
     restart: unless-stopped
     depends_on:
