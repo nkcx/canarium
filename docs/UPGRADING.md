@@ -453,3 +453,22 @@ macvlan networking makes that path work; the API sources are unaffected.
 A configured `mac:` always wins and skips discovery entirely. Setting it by
 hand remains the most reliable option and is still what the guide
 recommends.
+
+---
+
+## New: the address bar tracks what you are looking at
+
+Every view used to live at `/`. Reloading always returned to the
+dashboard, the back button left the app, and there was no way to link
+someone to what you were looking at.
+
+Views are now paths: `/plans`, `/settings`, `/clients`, and
+`/clients/<name>` for a selected client, with the dashboard at the root.
+Nothing is required of you — existing bookmarks to the root still work, and
+a path this build does not recognise resolves to the dashboard.
+
+If you run Canarium behind a reverse proxy that rewrites or restricts paths,
+it must pass everything through to the daemon rather than only `/` and
+`/api`. The daemon serves the interface for any path it does not otherwise
+handle, which is what makes deep links and reloads work. The shipped Traefik
+labels already do this.

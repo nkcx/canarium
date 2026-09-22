@@ -18,7 +18,7 @@
 # Canarium — Product Specification
 
 **Version:** 0.3
-**Status:** Implemented as of v0.1.2, with the exceptions noted above
+**Status:** Implemented as of v0.1.3, with the exceptions noted above
 
 ---
 
@@ -143,7 +143,7 @@ services:
     # Pinned deliberately: this is the thing that shuts your fleet down,
     # and an unattended `docker compose pull` should not be able to change
     # its behaviour. Use :latest instead if you would rather track releases.
-    image: ghcr.io/nkcx/canarium:0.1.2
+    image: ghcr.io/nkcx/canarium:0.1.3
     ports:
       - "8420:8420"
     volumes:
