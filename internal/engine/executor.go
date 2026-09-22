@@ -120,6 +120,11 @@ type Executor struct {
 	upsSourcesOnce   sync.Once
 	cachedUPSSources []string
 
+	// wouldTrigger records, per plan, that its trigger held while
+	// disarmed, so "would have triggered" is reported once per episode
+	// rather than on every policy tick. Guarded by mu.
+	wouldTrigger map[string]bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -199,8 +204,26 @@ func (e *Executor) Mode() Mode {
 
 func (e *Executor) SetMode(m Mode) {
 	e.mu.Lock()
+	previous := e.mode
 	e.mode = m
+	if m != ModeDisarmed {
+		e.wouldTrigger = nil
+	}
 	e.mu.Unlock()
+
+	// Disarmed mode now times triggers so it can report what would have
+	// happened. Without this reset, arming during an outage that had
+	// already held a trigger for its full `for:` would start the sequence
+	// on the very next tick -- the click that says "arm" would also be the
+	// click that shuts machines down, with no chance to see it coming.
+	// Requiring the trigger to hold again, observed while armed, costs one
+	// dwell period and removes the surprise.
+	if previous == ModeDisarmed && m != ModeDisarmed {
+		for i := range e.cfg.Plans {
+			e.evaluator.ResetDwell(&e.cfg.Plans[i].Trigger)
+		}
+	}
+
 	e.emit(Event{Type: "mode_changed", Timestamp: time.Now(), Data: m.String()})
 }
 
@@ -677,10 +700,7 @@ func (e *Executor) policyLoop() {
 }
 
 func (e *Executor) evaluatePolicies() {
-	if e.Mode() != ModeArmed && e.Mode() != ModeDryRun {
-		return
-	}
-
+	mode := e.Mode()
 	now := time.Now()
 
 	for i := range e.cfg.Plans {
@@ -690,7 +710,20 @@ func (e *Executor) evaluatePolicies() {
 			break
 		}
 
-		if e.evaluator.Evaluate(&plan.Trigger, now) != facts.True {
+		triggered := e.evaluator.Evaluate(&plan.Trigger, now) == facts.True
+
+		// Disarmed evaluates and reports, and never executes. It used to
+		// return before evaluating anything, so the mode documented as
+		// "sources poll, conditions evaluate, nothing executes" -- the
+		// mode whose whole purpose is letting an operator verify that
+		// conditions evaluate as expected -- gave no signal at all that a
+		// real outage would have fired the plan.
+		if mode == ModeDisarmed {
+			e.noteWouldTrigger(plan.Name, triggered, now)
+			continue
+		}
+
+		if !triggered {
 			continue
 		}
 
@@ -824,4 +857,26 @@ func (e *Executor) buildClient(c *config.ClientConfig) *Client {
 // fresh evaluator would report every `for:` as untracked.
 func (e *Executor) ExplainCondition(cond *config.ConditionConfig, now time.Time) conditions.Explanation {
 	return e.evaluator.Explain(cond, now)
+}
+
+// noteWouldTrigger reports, once per episode, that a plan's trigger held
+// while Canarium was disarmed.
+func (e *Executor) noteWouldTrigger(plan string, triggered bool, now time.Time) {
+	e.mu.Lock()
+	was := e.wouldTrigger[plan]
+	if triggered {
+		if e.wouldTrigger == nil {
+			e.wouldTrigger = make(map[string]bool)
+		}
+		e.wouldTrigger[plan] = true
+	} else {
+		delete(e.wouldTrigger, plan)
+	}
+	e.mu.Unlock()
+
+	if triggered && !was {
+		e.logger.Info("plan would have triggered, but Canarium is disarmed",
+			"plan", plan)
+		e.emit(Event{Type: "would_trigger", Timestamp: now, Data: plan})
+	}
 }

@@ -426,7 +426,13 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	previous := s.executor.Mode()
-	s.executor.SetMode(mode)
+
+	// Arming restarts trigger dwell timers, which deletes their persisted
+	// state. That write is deliberately not bound to this request: if the
+	// client disconnected mid-way, cancelling it would leave the in-memory
+	// timers reset and the persisted ones not, and a restart would restore
+	// credit the operator's arm was meant to discard.
+	s.executor.SetMode(mode) //nolint:contextcheck // see above
 
 	if err := s.db.SetKV(r.Context(), "mode", mode.String()); err != nil {
 		s.logger.Error("persisting mode", "error", err)
