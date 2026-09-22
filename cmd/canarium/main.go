@@ -528,6 +528,7 @@ func runDaemon(configPath string) error {
 
 	server := api.NewServer(cfg, store, executor, db, canarium.WebFS, logger)
 	server.SetVersion(version)
+	server.SetConfigWarnings(result.Warnings)
 	executor.AddListener(server.EventListener())
 
 	for _, warning := range db.Warnings() {

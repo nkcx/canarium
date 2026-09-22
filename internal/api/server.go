@@ -62,8 +62,12 @@ type Server struct {
 	wsMu      sync.RWMutex
 	wsClients map[*wsClient]struct{}
 
-	// version is reported by the health endpoint.
+	// version is reported by the health and status endpoints.
 	version string
+
+	// configWarnings are validation warnings from startup, surfaced in
+	// the status response. Never nil, so it serialises as [].
+	configWarnings []string
 
 	// loginLimiter throttles repeated failed logins per source address.
 	loginLimiter *failureLimiter
@@ -100,6 +104,8 @@ func NewServer(
 		webFS:     webFS,
 		mux:       http.NewServeMux(),
 		wsClients: make(map[*wsClient]struct{}),
+
+		configWarnings: []string{},
 		loginLimiter: newFailureLimiter(
 			maxLoginFailures, failureWindow, lockoutDuration),
 		setupLimiter: newFailureLimiter(
@@ -118,6 +124,11 @@ func NewServer(
 
 // SetVersion records the build version for the health endpoint.
 func (s *Server) SetVersion(v string) { s.version = v }
+
+// SetConfigWarnings records validation warnings for the status endpoint.
+func (s *Server) SetConfigWarnings(warnings []string) {
+	s.configWarnings = append([]string{}, warnings...)
+}
 
 func (s *Server) routes() {
 	// Unauthenticated: the healthcheck and the endpoints needed to
@@ -291,17 +302,27 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mode":     s.executor.Mode().String(),
 		"sequence": seqData,
 		"clients":  clients,
+		"version":  s.version,
+
+		// What validation said at startup. These were only ever logged,
+		// so an operator using the UI had no way to learn that, say,
+		// every stage of their plan matched no clients and an outage
+		// would shut nothing down.
+		"config_warnings": s.configWarnings,
 	})
 }
 
 func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	type factInfo struct {
-		Value       any       `json:"value"`
-		Quality     string    `json:"quality"`
-		UpdatedAt   time.Time `json:"updated_at"`
-		Type        string    `json:"type,omitempty"`
-		Unit        string    `json:"unit,omitempty"`
-		Description string    `json:"description,omitempty"`
+		Value   any    `json:"value"`
+		Quality string `json:"quality"`
+
+		// UpdatedAt is null for a fact that has never been reported. It
+		// was the zero time, which the UI rendered as "17757122h ago".
+		UpdatedAt   *time.Time `json:"updated_at"`
+		Type        string     `json:"type,omitempty"`
+		Unit        string     `json:"unit,omitempty"`
+		Description string     `json:"description,omitempty"`
 	}
 
 	declarations := s.store.AllDeclarations()
@@ -310,7 +331,10 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	for key, f := range s.store.AllFacts() {
 		value, quality, updated := f.Get()
 
-		info := factInfo{Value: value, Quality: quality.String(), UpdatedAt: updated}
+		info := factInfo{Value: value, Quality: quality.String()}
+		if !updated.IsZero() {
+			info.UpdatedAt = &updated
+		}
 
 		// Type, unit and description come from the source's declaration.
 		// Without them the UI cannot tell 3600 seconds of runtime from 3600
@@ -341,7 +365,10 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		State       string   `json:"state"`
 	}
 
-	var clients []clientInfo
+	// An empty list, not null. With `clients: []` this returned null, so
+	// every consumer had to special-case the one configuration a new
+	// deployment is most likely to have.
+	clients := make([]clientInfo, 0, len(s.cfg.Clients))
 	for _, c := range s.cfg.Clients {
 		clients = append(clients, clientInfo{
 			Name:        c.Name,
@@ -357,22 +384,6 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.writeJSON(w, http.StatusOK, clients)
-}
-
-func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
-	type planInfo struct {
-		Name   string `json:"name"`
-		Stages int    `json:"stages"`
-	}
-
-	var plans []planInfo
-	for _, p := range s.cfg.Plans {
-		plans = append(plans, planInfo{
-			Name:   p.Name,
-			Stages: len(p.Shutdown.Stages),
-		})
-	}
-	s.writeJSON(w, http.StatusOK, plans)
 }
 
 func (s *Server) handleSequence(w http.ResponseWriter, r *http.Request) {

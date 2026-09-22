@@ -623,7 +623,7 @@ func warnIfBudgetTooShortToVerify(c ClientConfig, result *ValidationResult) {
 // completes, and failing an existing deployment's config on upgrade is
 // worse than telling its operator to look.
 func warnIfWakeGateMissing(p PlanConfig, result *ValidationResult) {
-	if !isZeroCondition(p.Wake.Gate) {
+	if !IsZeroCondition(p.Wake.Gate) {
 		return
 	}
 
@@ -636,11 +636,11 @@ func warnIfWakeGateMissing(p PlanConfig, result *ValidationResult) {
 		"really do mean immediately.", p.Name)
 }
 
-// isZeroCondition reports whether a condition was left unspecified.
+// IsZeroCondition reports whether a condition was left unspecified.
 //
 // Distinguishable from an explicit `condition: "true"`, which is how an
 // operator says they really do mean unconditional.
-func isZeroCondition(c ConditionConfig) bool {
+func IsZeroCondition(c ConditionConfig) bool {
 	return c.Condition == "" && c.Fact == "" && c.Value == "" &&
 		c.Above == nil && c.Below == nil && c.Equals == nil &&
 		c.Is == "" && c.IsNot == "" && c.Contains == "" &&

@@ -817,3 +817,11 @@ func (e *Executor) buildClient(c *config.ClientConfig) *Client {
 
 	return client
 }
+
+// ExplainCondition describes how a condition evaluates now, without the
+// side effects of Evaluate. It uses the executor's own evaluator because
+// that is the one holding the dwell timers the policy loop maintains; a
+// fresh evaluator would report every `for:` as untracked.
+func (e *Executor) ExplainCondition(cond *config.ConditionConfig, now time.Time) conditions.Explanation {
+	return e.evaluator.Explain(cond, now)
+}
