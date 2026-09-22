@@ -6,7 +6,7 @@ import {
 describe('describeCondition', () => {
   it('says what each leaf condition tests', () => {
     expect(describeCondition({ condition: 'state', fact: 'rack_ups.status', contains: 'OB' }))
-      .toBe('rack_ups.status contains OB');
+      .toBe('rack_ups.status contains OB (on battery)');
     expect(describeCondition({ condition: 'state', fact: 's', is: 'OL' })).toBe('s is OL');
     expect(describeCondition({ condition: 'state', fact: 's', is_not: 'OL' })).toBe('s is not OL');
     expect(describeCondition({ condition: 'state', fact: 's', in: ['OB', 'LB'] }))
@@ -15,6 +15,15 @@ describe('describeCondition', () => {
     expect(describeCondition({ condition: 'numeric', fact: 'c', above: 60 })).toBe('c above 60');
     expect(describeCondition({ condition: 'numeric', fact: 'c', above: 20, below: 30 }))
       .toBe('c between 20 and 30');
+  });
+
+  it('only glosses status facts', () => {
+    // "OB" means on battery for a UPS status, and nothing in particular
+    // for an arbitrary set-valued fact.
+    expect(describeCondition({ condition: 'state', fact: 'gpio.mode', contains: 'OB' }))
+      .toBe('gpio.mode contains OB');
+    expect(describeCondition({ condition: 'state', fact: 'rack_ups.status', contains: 'XYZ' }))
+      .toBe('rack_ups.status contains XYZ');
   });
 
   it('does not lose a zero threshold', () => {
@@ -84,6 +93,8 @@ describe('currentReading', () => {
   it('shows what the condition decided on', () => {
     expect(currentReading({ condition: 'state', fact: 's', fact_value: ['OL'], fact_quality: 'good' }))
       .toBe('currently OL');
+    expect(currentReading({ condition: 'state', fact: 'rack_ups.status', fact_value: ['OL', 'CHRG'], fact_quality: 'good' }))
+      .toBe('currently OL CHRG — on mains, charging');
     expect(currentReading({ condition: 'numeric', fact: 'c', fact_value: 100, fact_quality: 'good' }))
       .toBe('currently 100');
     expect(currentReading({ condition: 'numeric', fact: 'c', fact_value: 38.44, fact_quality: 'good' }))

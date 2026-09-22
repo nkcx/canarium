@@ -4,7 +4,7 @@
   } from '../lib/stores/api.js';
   import {
     formatValue, unitSuffix, timeAgo, qualityTone, sortFacts, primaryPower,
-    splitFactKey, sourceHealth, factStatus,
+    splitFactKey, sourceHealth, factStatus, describeStatus, isStatusFact, isIdentity, isRating,
   } from '../lib/facts.js';
   import { describeEvent, stateLabel, stateTone, stateNote } from '../lib/events.js';
   import Section from '../lib/components/Section.svelte';
@@ -21,7 +21,21 @@
   // the device simply does not provide is not a fault and never changes,
   // and counting it here put a permanent amber warning on a healthy UPS.
   $: problemFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) === 'problem');
-  $: shownFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) !== 'unsupported');
+  // Identity facts (manufacturer, model) are in the headline, not the grid.
+  $: visibleFacts = sortedFacts.filter(
+    ([k, f]) => factStatus(k, f, health) !== 'unsupported' && !isIdentity(k),
+  );
+
+  // Ratings and thresholds -- nominal voltages, the low-battery point, the
+  // transfer voltages -- are fixed properties of the UPS. Given a full card
+  // each, a Back-UPS's seven of them outnumbered its live readings. A
+  // rating that has a problem stays in the grid, where problems belong.
+  $: shownFacts = visibleFacts.filter(
+    ([k, f]) => !isRating(k) || factStatus(k, f, health) === 'problem',
+  );
+  $: ratingFacts = visibleFacts.filter(
+    ([k, f]) => isRating(k) && factStatus(k, f, health) !== 'problem',
+  );
   $: unsupportedFacts = sortedFacts.filter(([k, f]) => factStatus(k, f, health) === 'unsupported');
 
   $: warnings = $status?.config_warnings ?? [];
@@ -46,7 +60,7 @@
   }
 
   const eventToneClass = {
-    live: 'text-amber',
+    live: 'text-canary',
     ok: 'text-ok',
     warn: 'text-warn',
     danger: 'text-danger',
@@ -123,7 +137,7 @@
 <!-- ── The headline ───────────────────────────────────────────────── -->
 <section
   class="mb-8 border rounded-[var(--radius-lg)] overflow-hidden
-    {seq ? 'border-amber/30 bg-amber/5' : 'border-edge bg-surface-50'}"
+    {seq ? 'border-canary/30 bg-canary/5' : 'border-edge bg-surface-50'}"
   aria-label="Current status"
 >
   <div class="p-5 sm:p-6">
@@ -150,7 +164,7 @@
           <div
             class="text-hero leading-none font-bold tabular-nums
               {power.runtime?.quality === 'good'
-                ? power.onBattery ? 'text-amber' : 'text-ink'
+                ? power.onBattery ? 'text-canary' : 'text-ink'
                 : 'text-ink-muted'}"
           >
             {power.runtime ? formatValue(power.runtime) : '—'}
@@ -166,13 +180,38 @@
           </div>
         </div>
 
+        {#if power.output}
+          <div>
+            <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1">
+              OUTPUT
+            </div>
+            <div
+              class="text-value leading-none font-bold tabular-nums text-ink"
+              title={power.output.estimated
+                ? `Estimated: ${formatValue(power.load)} load of a ${power.output.rated} W rating. `
+                  + 'This UPS reports its load and rating but not its output directly; '
+                  + 'its front panel makes the same calculation.'
+                : 'Reported by the UPS'}
+            >
+              {power.output.estimated ? '≈' : ''}{power.output.watts}<span
+                class="text-meta font-normal text-ink-muted">&nbsp;W</span>
+            </div>
+          </div>
+        {/if}
+
         <div class="min-w-0">
-          <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1 truncate">
-            {power.source}
+          <div class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-1 truncate"
+            title={power.source}>
+            {(power.model || power.source).toUpperCase()}
           </div>
           <div class="text-value leading-none font-bold text-ink-secondary">
-            {power.status ? formatValue(power.status) : '—'}
+            {power.status ? describeStatus(power.status.value) || '—' : '—'}
           </div>
+          {#if power.flags.length}
+            <div class="text-meta text-ink-faint mt-1 tabular-nums">
+              {power.flags.join(' ')}
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -190,7 +229,7 @@
   </div>
 
   {#if seq}
-    <div class="px-5 sm:px-6 py-3 border-t border-amber/20 bg-surface-0/30
+    <div class="px-5 sm:px-6 py-3 border-t border-canary/20 bg-surface-0/30
       flex flex-wrap items-center gap-x-6 gap-y-1 text-meta">
       <span class="text-ink-muted">
         Started <span class="text-ink-secondary">{timeAgo(seq.started_at)}</span>
@@ -342,9 +381,16 @@
             class="text-value font-bold tabular-nums mt-1 break-words
               {fact.quality === 'good' ? 'text-ink' : 'text-ink-muted'}"
           >
-            {formatValue(fact)}<span class="text-meta font-normal text-ink-muted"
-              >{unitSuffix(fact)}</span
-            >
+            {#if isStatusFact(key) && fact.quality === 'good'}
+              <!-- NUT's codes, said in words; the codes stay beneath because
+                   they are what a condition has to be written against. -->
+              {describeStatus(fact.value) || '—'}
+              <span class="block text-meta font-normal text-ink-muted">{formatValue(fact)}</span>
+            {:else}
+              {formatValue(fact)}<span class="text-meta font-normal text-ink-muted"
+                >{unitSuffix(fact)}</span
+              >
+            {/if}
           </div>
           <div class="flex items-center gap-1.5 mt-1.5">
             <StatusDot tone={qualityTone(fact.quality)} />
@@ -358,14 +404,43 @@
     </div>
   {/if}
 
+  {#if ratingFacts.length > 0}
+    <div class="mt-4">
+      <h3 class="text-eyebrow text-ink-muted tracking-[0.12em] font-bold mb-2">
+        RATINGS AND THRESHOLDS
+      </h3>
+      <dl class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1
+        border border-edge-subtle rounded-[var(--radius-sm)] px-3 py-2.5">
+        {#each ratingFacts as [key, fact] (key)}
+          <div class="flex items-baseline justify-between gap-3 min-w-0">
+            <dt class="text-meta text-ink-muted truncate" title={key}>
+              {splitFactKey(key).reading}
+            </dt>
+            <dd class="text-body text-ink-secondary tabular-nums shrink-0">
+              {formatValue(fact)}<span class="text-meta text-ink-muted">{unitSuffix(fact)}</span>
+            </dd>
+          </div>
+        {/each}
+      </dl>
+    </div>
+  {/if}
+
   {#if unsupportedFacts.length > 0}
-    <p class="text-meta text-ink-muted mt-3">
-      Not provided by this hardware:
-      {unsupportedFacts.map(([k]) => k).join(', ')}.
-      <span class="text-ink-faint">
-        The source is reporting, but has never sent these readings.
-      </span>
-    </p>
+    <!-- Collapsed: a Back-UPS provides roughly half of NUT's standard set,
+         and the rest is a property of the hardware, not something to act on. -->
+    <details class="mt-3 text-meta">
+      <summary class="cursor-pointer text-ink-muted hover:text-ink-secondary min-h-10 flex items-center">
+        {unsupportedFacts.length} standard
+        {unsupportedFacts.length === 1 ? 'reading is' : 'readings are'} not provided by this hardware
+      </summary>
+      <p class="text-ink-muted mt-1 break-words">
+        {unsupportedFacts.map(([k]) => k).join(', ')}.
+      </p>
+      <p class="text-ink-faint mt-1">
+        The source is reporting, but has never sent these. That is normal: each
+        UPS driver supports a different subset.
+      </p>
+    </details>
   {/if}
 </Section>
 

@@ -6,7 +6,7 @@
  * wondering why a plan had or had not triggered had to go and read YAML --
  * during the outage.
  */
-import { formatSeconds } from './facts.js';
+import { formatSeconds, statusFlagLabel, describeStatus, isStatusFact } from './facts.js';
 
 /** A condition as a phrase: "rack_ups.status contains OB". */
 export function describeCondition(ex) {
@@ -32,9 +32,16 @@ export function describeCondition(ex) {
     }
 
     case 'state': {
-      if (ex.contains) return `${fact} contains ${ex.contains}`;
-      if (ex.is) return `${fact} is ${ex.is}`;
-      if (ex.is_not) return `${fact} is not ${ex.is_not}`;
+      // NUT status codes get their meaning alongside: "contains OB" is
+      // exact but opaque, "(on battery)" is what it means.
+      const gloss = (code) => {
+        if (!isStatusFact(fact)) return '';
+        const label = statusFlagLabel(code);
+        return label === code ? '' : ` (${label.toLowerCase()})`;
+      };
+      if (ex.contains) return `${fact} contains ${ex.contains}${gloss(ex.contains)}`;
+      if (ex.is) return `${fact} is ${ex.is}${gloss(ex.is)}`;
+      if (ex.is_not) return `${fact} is not ${ex.is_not}${gloss(ex.is_not)}`;
       if (ex.in?.length) return `${fact} is one of ${ex.in.join(', ')}`;
       if (ex.equals !== undefined && ex.equals !== null) return `${fact} is ${ex.equals}`;
       return `${fact} (no comparison)`;
@@ -90,6 +97,9 @@ export function currentReading(ex) {
   }
   const v = ex.fact_value;
   if (v === null || v === undefined) return '';
+  if (Array.isArray(v) && isStatusFact(ex.fact) && v.length) {
+    return `currently ${v.join(' ')} — ${describeStatus(v).toLowerCase()}`;
+  }
   if (Array.isArray(v)) return `currently ${v.length ? v.join(' ') : 'empty'}`;
   if (typeof v === 'number') return `currently ${Number.isInteger(v) ? v : v.toFixed(1)}`;
   return `currently ${v}`;

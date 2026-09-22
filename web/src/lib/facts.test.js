@@ -3,6 +3,7 @@ import {
   formatValue, formatSeconds, unitSuffix, unitSymbol, qualityTone, timeAgo,
   splitFactKey, factRank, sortFacts, primaryPower,
   neverReported, sourceHealth, factStatus,
+  describeStatus, statusFlagLabel, outputWatts, isIdentity,
 } from './facts.js';
 
 const good = (value, extra = {}) => ({ value, quality: 'good', ...extra });
@@ -315,5 +316,79 @@ describe('unsupported readings vs readings that stopped', () => {
   it('treats a false or zero value as reported', () => {
     expect(neverReported({ value: 0, quality: 'good', updated_at: null })).toBe(false);
     expect(neverReported({ value: false, quality: 'good', updated_at: null })).toBe(false);
+  });
+});
+
+describe('status flags', () => {
+  it('says what OL means', () => {
+    // The dashboard showed a UPS status of "OL", which is NUT shorthand
+    // for on line -- mains power -- and opaque without the NUT manual.
+    expect(describeStatus(['OL'])).toBe('On mains');
+    expect(describeStatus(['OL', 'CHRG'])).toBe('On mains, charging');
+    expect(describeStatus(['OB', 'DISCHRG', 'LB'])).toBe('On battery, discharging, battery low');
+    expect(describeStatus('OB DISCHRG')).toBe('On battery, discharging');
+  });
+
+  it('passes an unknown flag through rather than hiding it', () => {
+    expect(statusFlagLabel('XYZZY')).toBe('XYZZY');
+  });
+
+  it('copes with nothing', () => {
+    expect(describeStatus([])).toBe('');
+    expect(describeStatus(null)).toBe('');
+  });
+});
+
+describe('outputWatts', () => {
+  const g = (value) => ({ value, quality: 'good' });
+
+  it('estimates from load and rating, as the front panel does', () => {
+    // An APC Back-UPS reports load % and its real-power rating over USB,
+    // but not the watts its own front panel displays.
+    const w = outputWatts({ 'u.ups.load': g(76), 'u.ups.realpower.nominal': g(865) }, 'u');
+    expect(w).toEqual({ watts: 657, estimated: true, rated: 865 });
+  });
+
+  it('prefers a measured reading', () => {
+    const w = outputWatts({
+      'u.ups.realpower': g(640), 'u.ups.load': g(76), 'u.ups.realpower.nominal': g(865),
+    }, 'u');
+    expect(w).toEqual({ watts: 640, estimated: false });
+  });
+
+  it('does not estimate from a stale input', () => {
+    const w = outputWatts({
+      'u.ups.load': { value: 76, quality: 'stale' }, 'u.ups.realpower.nominal': g(865),
+    }, 'u');
+    expect(w).toBeNull();
+  });
+
+  it('reports a zero load as zero watts, not as missing', () => {
+    expect(outputWatts({ 'u.ups.load': g(0), 'u.ups.realpower.nominal': g(865) }, 'u').watts).toBe(0);
+  });
+
+  it('returns null without enough to go on', () => {
+    expect(outputWatts({ 'u.ups.load': g(76) }, 'u')).toBeNull();
+  });
+});
+
+describe('ordering the wider NUT set', () => {
+  it('puts live readings before ratings and thresholds', () => {
+    const facts = {
+      'u.battery.charge.low': good(10),
+      'u.input.transfer.high': good(144),
+      'u.ups.realpower.nominal': good(865),
+      'u.ups.load': good(76),
+      'u.battery.charge': good(100),
+    };
+    const keys = sortFacts(facts).map(([k]) => k);
+    expect(keys.indexOf('u.ups.load')).toBeLessThan(keys.indexOf('u.ups.realpower.nominal'));
+    expect(keys.indexOf('u.ups.load')).toBeLessThan(keys.indexOf('u.battery.charge.low'));
+    expect(keys[0]).toBe('u.battery.charge');
+  });
+
+  it('recognises identity facts', () => {
+    expect(isIdentity('rack_ups.device.model')).toBe(true);
+    expect(isIdentity('rack_ups.ups.load')).toBe(false);
   });
 });

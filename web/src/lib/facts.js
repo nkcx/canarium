@@ -160,6 +160,86 @@ export function factStatus(key, fact, health) {
   return 'problem';
 }
 
+/**
+ * NUT status flags, in words.
+ *
+ * The dashboard showed "OL" as a UPS's status, which is NUT's shorthand for
+ * "on line" -- on mains power -- and is opaque to anyone who has not read
+ * the NUT documentation. The codes stay visible alongside, because they
+ * are what a condition in the config has to be written against.
+ */
+const STATUS_FLAGS = {
+  OL: 'On mains',
+  OB: 'On battery',
+  LB: 'Battery low',
+  HB: 'Battery high',
+  RB: 'Replace battery',
+  CHRG: 'Charging',
+  DISCHRG: 'Discharging',
+  BYPASS: 'On bypass',
+  CAL: 'Calibrating',
+  OFF: 'Output off',
+  OVER: 'Overloaded',
+  TRIM: 'Trimming high input voltage',
+  BOOST: 'Boosting low input voltage',
+  FSD: 'Forced shutdown',
+  ALARM: 'Alarm',
+};
+
+export function statusFlagLabel(flag) {
+  return STATUS_FLAGS[flag] ?? flag;
+}
+
+/** "On mains, charging" from ["OL", "CHRG"]. */
+export function describeStatus(flags) {
+  const list = Array.isArray(flags) ? flags : String(flags ?? '').split(/\s+/).filter(Boolean);
+  if (list.length === 0) return '';
+  const words = list.map(statusFlagLabel);
+  return [words[0], ...words.slice(1).map((w) => w.charAt(0).toLowerCase() + w.slice(1))].join(', ');
+}
+
+/** True for set-valued status facts whose values are NUT flags. */
+export function isStatusFact(key) {
+  return key.endsWith('.status');
+}
+
+/**
+ * Output power in watts, measured or estimated.
+ *
+ * An APC Back-UPS shows output watts on its front panel but, over USB,
+ * reports only a load percentage and its real-power rating. The front
+ * panel computes the product; so does this, and says so. A UPS that
+ * reports real power directly is used as-is.
+ */
+export function outputWatts(factMap, source) {
+  const measured = factMap[`${source}.ups.realpower`];
+  if (measured?.quality === 'good' && typeof measured.value === 'number') {
+    return { watts: measured.value, estimated: false };
+  }
+
+  const load = factMap[`${source}.ups.load`];
+  const rated = factMap[`${source}.ups.realpower.nominal`];
+  if (load?.quality === 'good' && typeof load.value === 'number' &&
+      rated?.quality === 'good' && typeof rated.value === 'number') {
+    return { watts: Math.round((load.value / 100) * rated.value), estimated: true, rated: rated.value };
+  }
+  return null;
+}
+
+/**
+ * Ratings and thresholds: what the UPS is configured or built for, rather
+ * than what it is doing. Worth having, but they never change, so they
+ * sort after the live readings.
+ */
+export function isRating(key) {
+  return /\.(nominal|low|high|warning)$/.test(key) || key.includes('.transfer.');
+}
+
+/** Device identity, shown in the headline rather than as a reading. */
+export function isIdentity(key) {
+  return /\.device\.(mfr|model)$/.test(key);
+}
+
 export function qualityTone(q) {
   if (q === 'good') return 'ok';
   if (q === 'stale') return 'warn';
@@ -181,9 +261,10 @@ export function factRank(key, fact, health) {
   if (status === 'problem') return 0;
   // Readings the device does not provide sort after everything, rather
   // than first: they are not a fault, and they will never change.
-  if (status === 'unsupported') return 4;
+  if (status === 'unsupported') return 5;
   if (isPower(key)) return 1;
-  if (key.startsWith('client.')) return 3;
+  if (key.startsWith('client.')) return 4;
+  if (isRating(key)) return 3;
   return 2;
 }
 
@@ -247,12 +328,19 @@ export function primaryPower(factMap) {
       ? status.value.split(/\s+/)
       : [];
 
+  const model = factMap[`${source}.device.model`];
+  const mfr = factMap[`${source}.device.mfr`];
+
   return {
     source,
     runtime,
     charge,
     status,
     flags,
+    output: outputWatts(factMap, source),
+    load: factMap[`${source}.ups.load`] ?? null,
+    model: model?.value ? String(model.value) : '',
+    manufacturer: mfr?.value ? String(mfr.value) : '',
     // OB is "on battery" in NUT's status vocabulary; OL is "on line".
     onBattery: flags.includes('OB') || flags.includes('DISCHRG'),
     onLine: flags.includes('OL'),

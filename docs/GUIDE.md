@@ -102,13 +102,33 @@ sources:
           poll_interval: 15s
 ```
 
-This produces facts like:
+This publishes NUT's standard variables as facts under the instance name. The ones most plans use:
+
+- `rack_ups.status` — UPS status flags (see below)
 - `rack_ups.battery.charge` — battery percentage (0–100)
 - `rack_ups.battery.runtime` — estimated seconds remaining
-- `rack_ups.status` — UPS status flags (OL, OB, LB, CHRG, etc.)
-- `rack_ups.ups.load` — load percentage
+- `rack_ups.ups.load` — load as a percentage of capacity
+- `rack_ups.input.voltage` — mains voltage; `0` during an outage
 
-NUT status is a **set of flags**, not a single value. A UPS can be `OL CHRG` (online and charging) simultaneously. Use `contains` in conditions to test for a specific flag.
+Also published when the UPS reports them: real and apparent power (`ups.realpower`, `ups.power`) and their ratings (`*.nominal`), input and output frequency, current and voltage, battery and UPS temperature, the low-battery and warning thresholds (`battery.charge.low`, `battery.runtime.low`, …), the input transfer voltages, the manufacturer and model, and the last self-test result.
+
+Each UPS driver supports a different subset, and a variable the UPS never sends simply stays unknown — the dashboard lists those as not provided by the hardware rather than as faults. To see exactly what yours reports:
+
+```bash
+docker exec nut upsc ups
+```
+
+**Output watts.** Many UPSes — APC Back-UPS models included — report a load percentage and a real-power rating over USB but not their output in watts, even though the front panel shows it. The panel multiplies the two; the dashboard does the same and marks the result `≈`. A UPS that reports `ups.realpower` directly is shown as-is.
+
+**Status is a set of flags**, not a single value. A UPS can be `OL CHRG` — on line (mains power) and charging — at once, so use `contains` in conditions to test for one flag. The dashboard shows them in words alongside the codes:
+
+| Flag | Meaning | Flag | Meaning |
+|---|---|---|---|
+| `OL` | On mains ("on line") | `CHRG` | Charging |
+| `OB` | On battery | `DISCHRG` | Discharging |
+| `LB` | Battery low | `RB` | Replace battery |
+| `FSD` | Forced shutdown | `OVER` | Overloaded |
+| `BYPASS` | On bypass | `TRIM` / `BOOST` | Correcting high / low input voltage |
 
 ### SNMP source
 
