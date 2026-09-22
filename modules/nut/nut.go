@@ -88,22 +88,89 @@ func NewSource(cfg Config, logger *slog.Logger) *Source {
 
 func (s *Source) Name() string { return "nut" }
 
+// standardVar maps one NUT variable onto a Canarium fact.
+type standardVar struct {
+	nut  string // the variable as NUT names it
+	fact string // the fact name under the instance
+	typ  string
+	unit string
+	desc string
+}
+
+// statusFlags are the values NUT's ups.status can carry.
+var statusFlags = []string{
+	"OL", "OB", "LB", "HB", "RB", "CHRG", "DISCHRG", "BYPASS", "CAL",
+	"OFF", "OVER", "TRIM", "BOOST", "FSD", "ALARM",
+}
+
+// standardVars is the set of NUT variables Canarium publishes as facts,
+// from NUT's variable naming standard (docs/nut-names.txt).
+//
+// This used to be eight variables, listed twice -- once to declare them
+// and once to read them -- and the two lists had to be kept in step by
+// hand. Every poll already fetched the UPS's complete variable list with
+// LIST VAR and then discarded everything else, so a UPS that reports its
+// real power, nominal ratings, input frequency or transfer thresholds had
+// those readings thrown away. An APC Back-UPS shows output watts on its
+// front panel; Canarium could not.
+//
+// A UPS reports whichever subset its driver supports. Variables it never
+// sends stay unknown, and the dashboard lists them as not provided by the
+// hardware rather than as faults.
+var standardVars = []standardVar{
+	{nut: "ups.status", fact: "status", typ: "set", desc: "UPS status flags"},
+
+	{nut: "battery.charge", fact: "battery.charge", typ: "percent", desc: "State of charge"},
+	{nut: "battery.charge.low", fact: "battery.charge.low", typ: "percent", desc: "Charge at which the UPS reports low battery"},
+	{nut: "battery.charge.warning", fact: "battery.charge.warning", typ: "percent", desc: "Charge at which the UPS warns"},
+	{nut: "battery.runtime", fact: "battery.runtime", typ: "duration", unit: "seconds", desc: "Estimated runtime remaining"},
+	{nut: "battery.runtime.low", fact: "battery.runtime.low", typ: "duration", unit: "seconds", desc: "Runtime at which the UPS reports low battery"},
+	{nut: "battery.voltage", fact: "battery.voltage", typ: "number", unit: "volts", desc: "Battery voltage"},
+	{nut: "battery.voltage.nominal", fact: "battery.voltage.nominal", typ: "number", unit: "volts", desc: "Nominal battery voltage"},
+	{nut: "battery.current", fact: "battery.current", typ: "number", unit: "amps", desc: "Battery current"},
+	{nut: "battery.temperature", fact: "battery.temperature", typ: "number", unit: "celsius", desc: "Battery temperature"},
+
+	{nut: "input.voltage", fact: "input.voltage", typ: "number", unit: "volts", desc: "Input voltage"},
+	{nut: "input.voltage.nominal", fact: "input.voltage.nominal", typ: "number", unit: "volts", desc: "Nominal input voltage"},
+	{nut: "input.frequency", fact: "input.frequency", typ: "number", unit: "hertz", desc: "Input frequency"},
+	{nut: "input.current", fact: "input.current", typ: "number", unit: "amps", desc: "Input current"},
+	{nut: "input.transfer.low", fact: "input.transfer.low", typ: "number", unit: "volts", desc: "Input voltage below which the UPS goes to battery"},
+	{nut: "input.transfer.high", fact: "input.transfer.high", typ: "number", unit: "volts", desc: "Input voltage above which the UPS goes to battery"},
+
+	{nut: "output.voltage", fact: "output.voltage", typ: "number", unit: "volts", desc: "Output voltage"},
+	{nut: "output.voltage.nominal", fact: "output.voltage.nominal", typ: "number", unit: "volts", desc: "Nominal output voltage"},
+	{nut: "output.frequency", fact: "output.frequency", typ: "number", unit: "hertz", desc: "Output frequency"},
+	{nut: "output.current", fact: "output.current", typ: "number", unit: "amps", desc: "Output current"},
+
+	{nut: "ups.load", fact: "ups.load", typ: "percent", desc: "Load as a share of capacity"},
+	{nut: "ups.realpower", fact: "ups.realpower", typ: "number", unit: "watts", desc: "Real power output"},
+	{nut: "ups.realpower.nominal", fact: "ups.realpower.nominal", typ: "number", unit: "watts", desc: "Rated real power"},
+	{nut: "ups.power", fact: "ups.power", typ: "number", unit: "VA", desc: "Apparent power output"},
+	{nut: "ups.power.nominal", fact: "ups.power.nominal", typ: "number", unit: "VA", desc: "Rated apparent power"},
+	{nut: "ups.efficiency", fact: "ups.efficiency", typ: "percent", desc: "Efficiency"},
+	{nut: "ups.temperature", fact: "ups.temperature", typ: "number", unit: "celsius", desc: "UPS internal temperature"},
+
+	{nut: "device.mfr", fact: "device.mfr", typ: "string", desc: "Manufacturer"},
+	{nut: "device.model", fact: "device.model", typ: "string", desc: "Model"},
+	{nut: "ups.test.result", fact: "ups.test.result", typ: "string", desc: "Result of the last self-test"},
+}
+
 func (s *Source) Declarations() []engine.SourceDeclaration {
+	facts := make([]engine.FactDeclEntry, 0, len(standardVars))
+	for _, v := range standardVars {
+		entry := engine.FactDeclEntry{Name: v.fact, Type: v.typ, Unit: v.unit, Description: v.desc}
+		if v.typ == "set" {
+			entry.Values = statusFlags
+		}
+		facts = append(facts, entry)
+	}
+
 	decls := make([]engine.SourceDeclaration, 0, len(s.instances))
 	for _, inst := range s.instances {
 		decls = append(decls, engine.SourceDeclaration{
 			InstanceName: inst.Name,
 			PollInterval: inst.pollInterval(),
-			Facts: []engine.FactDeclEntry{
-				{Name: "battery.charge", Type: "percent", Description: "State of charge"},
-				{Name: "battery.runtime", Type: "duration", Unit: "seconds", Description: "Estimated runtime remaining"},
-				{Name: "status", Type: "set", Values: []string{"OL", "OB", "LB", "RB", "CHRG", "DISCHRG", "ALARM", "OVER", "TRIM", "BOOST", "BYPASS", "OFF"}, Description: "UPS status flags"},
-				{Name: "battery.voltage", Type: "number", Unit: "volts", Description: "Battery voltage"},
-				{Name: "input.voltage", Type: "number", Unit: "volts", Description: "Input voltage"},
-				{Name: "output.voltage", Type: "number", Unit: "volts", Description: "Output voltage"},
-				{Name: "ups.load", Type: "percent", Description: "UPS load percentage"},
-				{Name: "ups.temperature", Type: "number", Unit: "celsius", Description: "UPS internal temperature"},
-			},
+			Facts:        facts,
 		})
 	}
 	return decls
@@ -155,32 +222,26 @@ func (s *Source) fetchAndUpdate(ctx context.Context, inst InstanceConfig, update
 		}
 	}
 
-	// NUT variable name -> Canarium fact name.
-	numeric := map[string]string{
-		"battery.charge":  "battery.charge",
-		"battery.runtime": "battery.runtime",
-		"battery.voltage": "battery.voltage",
-		"input.voltage":   "input.voltage",
-		"output.voltage":  "output.voltage",
-		"ups.load":        "ups.load",
-		"ups.temperature": "ups.temperature",
-	}
-	for nutVar, factName := range numeric {
-		v, ok := vars[nutVar]
+	for _, sv := range standardVars {
+		raw, ok := vars[sv.nut]
 		if !ok {
 			continue
 		}
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			s.logger.Warn("NUT returned a non-numeric value for a numeric variable",
-				"instance", inst.Name, "variable", nutVar, "value", v)
-			continue
-		}
-		emit(factName, f)
-	}
 
-	if v, ok := vars["ups.status"]; ok {
-		emit("status", strings.Fields(v))
+		switch sv.typ {
+		case "set":
+			emit(sv.fact, strings.Fields(raw))
+		case "string":
+			emit(sv.fact, strings.TrimSpace(raw))
+		default:
+			f, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if err != nil {
+				s.logger.Warn("NUT returned a non-numeric value for a numeric variable",
+					"instance", inst.Name, "variable", sv.nut, "value", raw)
+				continue
+			}
+			emit(sv.fact, f)
+		}
 	}
 }
 
