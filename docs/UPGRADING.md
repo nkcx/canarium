@@ -413,3 +413,43 @@ colours still mean what they meant — canary for "look here", green for
 healthy, orange for degraded, red for irreversible or failed — only the
 shades changed. The leftover Vite scaffolding that had been shipped in its
 place, including a purple lightning-bolt favicon nothing linked to, is gone.
+
+---
+
+## New: MAC addresses can be discovered
+
+`mac:` on a client was documented as optional — "Canarium can discover it
+via ARP" — and was not. The MAC came from the configuration file or nowhere,
+so a client with `wake: {transport: wol}` and no `mac:` had nothing to send
+a magic packet to, and failed during the recovery with "no MAC address
+configured".
+
+Discovery now happens at sequence start, while the fleet is still up, which
+is the only moment it can: a host that is off cannot report its hardware
+address, and wake-on-LAN is exactly what needs it.
+
+| Transport | Source |
+|---|---|
+| `truenas` | `interface.query` over the API it already uses |
+| `opnsense` | `/api/diagnostics/interface/getInterfaceConfig` |
+| anything else | the kernel's neighbour table, for hosts on a directly attached subnet |
+
+Both API sources pick the interface holding the client's address, so a
+device with several NICs gets the right one, and both work across VLANs
+where the neighbour table cannot. Where the address matches nothing and
+more than one interface is a candidate, discovery returns nothing rather
+than guessing: waking the wrong NIC is indistinguishable from waking
+nothing.
+
+**Proxmox has no discovery.** Its API does not expose a node's own MAC —
+`/nodes/{node}/network` documents no hardware-address field, and no other
+node endpoint carries one. Set `mac:` by hand for Proxmox nodes.
+
+**The neighbour table is empty in the shipped compose file.** A container on
+a Docker bridge network reaches everything beyond the bridge through the
+gateway, so the kernel never learns those hosts' hardware addresses. Host or
+macvlan networking makes that path work; the API sources are unaffected.
+
+A configured `mac:` always wins and skips discovery entirely. Setting it by
+hand remains the most reliable option and is still what the guide
+recommends.

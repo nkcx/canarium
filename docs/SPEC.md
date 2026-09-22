@@ -431,7 +431,9 @@ Stage progress is determined by client state, not by wake eligibility. A client 
 
 Users specify what they know: hostname, IP, MAC, or any combination. Canarium resolves the rest:
 
-- **At config load:** resolve hostnames via DNS, discover MACs via ARP for clients that are reachable. Warn if resolution fails. MAC discovery via ARP is best-effort — it only works for hosts on the same subnet and only when they're up. For reliable WOL, static MAC configuration is recommended.
+- **At sequence start:** resolve hostnames via DNS and pin the result for the rest of the sequence, and discover the MAC of any client whose config omits one. Warn if resolution fails.
+
+  MAC discovery is best-effort and happens while the fleet is still up, because a host that is off cannot report its own hardware address. Two sources, in order: the device's own API, for transports that expose interface details (`truenas`, `opnsense`), which works across subnets and picks the interface holding the client's address; then the kernel's neighbour table, which only covers a directly attached subnet and is empty inside a container on a bridge network. Proxmox exposes no MAC through its API. For reliable WOL, static MAC configuration remains recommended.
 - **Continuously:** background refresh of the resolution cache on a configurable interval. The cached state is always warm.
 - **At sequence start:** snapshot all resolved details into the state database. This snapshot is what the wake plan uses — name resolution is forbidden at wake time because DNS may be one of the things that's down.
 

@@ -112,6 +112,27 @@ type ActionRemapper interface {
 	RemapAction(action ActionType) ActionType
 }
 
+// MACDiscoverer is implemented by transports that can ask a device for its
+// own hardware address.
+//
+// Wake-on-LAN needs a MAC, and a MAC is the one thing about a host that
+// cannot be looked up once the host is off. Configuring it by hand works
+// and stays the most reliable option -- but it is also a value nobody can
+// read off a running machine without going to find it, and it changes when
+// a NIC is replaced. A device that manages its own network already knows
+// the answer, so the transport that talks to it can ask while it is still
+// up.
+//
+// Implementations return "" with no error when the device genuinely has no
+// answer, and an error when the question could not be put. Discovery is
+// best effort: it runs while the fleet is still healthy, and a failure
+// leaves the client exactly as it was.
+type MACDiscoverer interface {
+	// DiscoverMAC returns the hardware address of the interface the given
+	// address belongs to, or "" if it cannot be determined.
+	DiscoverMAC(ctx context.Context, client *Client) (string, error)
+}
+
 type Source interface {
 	Name() string
 	Declarations() []SourceDeclaration

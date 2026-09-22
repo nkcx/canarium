@@ -199,9 +199,16 @@ clients:
       broadcast: 10.0.10.255
 ```
 
-**`address`** — hostname or IP. Canarium resolves hostnames to IPs and discovers MACs via ARP automatically, keeping the cache fresh. At sequence start, it snapshots all resolved addresses so wake doesn't depend on DNS (which may be down).
+**`address`** — hostname or IP. At sequence start, Canarium resolves every hostname and snapshots the result, so wake doesn't depend on DNS still working — which it may not be, if the DNS server is on the same UPS.
 
-**`mac`** — optional if Canarium can discover it via ARP (same subnet, host is up). Required for reliable WOL if the host is on a different VLAN or might be down when Canarium starts.
+**`mac`** — needed for wake-on-LAN, and worth setting by hand: it's the one fact about a host that cannot be looked up once the host is off. If you omit it, Canarium tries to find it at sequence start, while the fleet is still up, and records what it finds in the same snapshot:
+
+1. **From the device itself**, for transports whose API reports interface details — `truenas` and `opnsense`. It picks the interface holding the client's address, so a box with several NICs gets the right one, and this works across VLANs. It needs the credentials the transport already uses.
+2. **From the kernel's neighbour table** (`/proc/net/arp`), which only knows hosts on a directly attached subnet. Inside a container on a Docker bridge network — which the shipped compose file uses — everything beyond the bridge is reached through the gateway, so this finds nothing. Host or macvlan networking makes it work.
+
+`proxmox` has no discovery: Proxmox's API does not expose the node's own MAC anywhere. Set `mac:` by hand for Proxmox nodes, or give Canarium host networking so the neighbour table can answer.
+
+Discovery is best-effort and never fails a sequence. If it finds nothing, wake-on-LAN reports "no MAC address configured" — during the recovery, which is the wrong time to learn it. Set `mac:` for anything you care about.
 
 **`shutdown_budget`** — how long to wait for the client to shut down. Also serves as the state transition timeout: if Canarium can't probe the client (e.g., the switch it's behind is already down), it records `down_unverified` after this duration.
 

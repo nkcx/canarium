@@ -788,6 +788,7 @@ func (e *Executor) configSnapshot() []byte {
 func (e *Executor) buildClientFor(as *ActiveSequence, c *config.ClientConfig) *Client {
 	client := e.buildClient(c)
 	client.Address = e.addressFor(as, c)
+	client.MAC = e.macFor(as, c)
 	return client
 }
 
