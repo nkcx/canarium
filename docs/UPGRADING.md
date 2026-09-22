@@ -510,3 +510,32 @@ wake fails.
 Nothing is required of you, and a configured `mac:` still wins over
 everything. It remains the most reliable option and is still what the guide
 recommends — this is here so that nobody is dependent on it.
+
+---
+
+## New: doctor checks whether wake-on-LAN can actually run
+
+`canarium doctor` contacts everything the config names, but it had nothing
+to say about the one value wake-on-LAN cannot work without. A client with no
+hardware address passed preflight and then failed during the recovery.
+
+It now reports, for every client woken by WOL, the address that would be
+used and where it comes from:
+
+| | |
+|---|---|
+| Configured `mac:` | OK |
+| A configured value that is not a usable address | FAIL — a typo is invisible until a wake silently does nothing |
+| Already learned by the daemon | OK, with when it was last confirmed |
+| Learned but not confirmed in over a week | WARN — the client has not been seen up since |
+| Not on record, but discoverable now | OK |
+| Nothing anywhere | FAIL, naming what to do |
+
+Clients with no `wake:` section, or woken by something other than WOL, need
+no address and are not checked.
+
+doctor runs as its own process, so it reads what the daemon has learned from
+the state database — read-only, and skipped entirely if there is no database
+yet. Without that it would report a client as unwakeable whenever it
+happened to be off at the moment doctor ran, even though the daemon has
+known its address for weeks.

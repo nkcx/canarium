@@ -23,6 +23,7 @@ import (
 	"github.com/nkcx/canarium/internal/engine"
 	"github.com/nkcx/canarium/internal/facts"
 	"github.com/nkcx/canarium/internal/netutil"
+	"github.com/nkcx/canarium/internal/state"
 )
 
 // Status is the outcome of one check.
@@ -130,6 +131,11 @@ type Doctor struct {
 	sources    []engine.Source
 	store      *facts.Store
 	opts       Options
+
+	// learnedMACs is what the daemon has already discovered, read from the
+	// state database. Nil when it could not be read, in which case doctor
+	// falls back to looking addresses up itself.
+	learnedMACs map[string]state.LearnedMAC
 }
 
 // New builds a Doctor.
@@ -408,6 +414,7 @@ func (d *Doctor) checkClient(ctx context.Context, c *config.ClientConfig, add fu
 	}
 
 	d.checkCredentials(subject, c, add)
+	d.checkWakeMAC(ctx, c, add)
 
 	// Probe only if the transport can.
 	hasProbe := false

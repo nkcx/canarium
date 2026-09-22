@@ -212,7 +212,7 @@ Discovery runs from the probe loop, so it keeps up with reality rather than taki
 
 Bad data is discarded rather than stored. An address that is unparseable, all zeroes, broadcast or multicast cannot wake anything, so it is ignored and the last good value stands. A failed lookup, or an appliance that has stopped answering, likewise changes nothing. An address that has genuinely changed — a replaced NIC — is accepted and logged.
 
-The Clients page shows each client's address, where it came from, and when it was last confirmed, so you can see whether discovery is working before you need it.
+The Clients page shows each client's address, where it came from, and when it was last confirmed, so you can see whether discovery is working before you need it. `canarium doctor` reports the same thing from the command line, and fails preflight for any client that wake-on-LAN could not wake.
 
 Discovery is best-effort and never fails a sequence. If nothing is ever found, wake-on-LAN reports "no MAC address configured" — during the recovery, which is the wrong time to learn it. Set `mac:` for anything you care about; discovery exists so that nobody is *dependent* on having done so.
 
@@ -751,7 +751,23 @@ canarium doctor -c config.yaml
 
 `validate` catches: missing fields, invalid and negative durations, duplicate names, dependency cycles, same-stage dependency violations, unknown client references, invalid expressions, plans that would shut down Canarium's own host, `post_shutdown` blocks naming an unknown UPS or unsupported action, and shutdown budgets too short to allow verification.
 
-`doctor` adds: client connectivity, transport credential verification, SNMP MIB availability, DNS resolution, NUT connectivity.
+`doctor` adds: client connectivity, transport credential verification, SNMP MIB availability, DNS resolution, NUT connectivity, and — for every client woken by wake-on-LAN — whether a hardware address is actually available to wake it with.
+
+That last one is worth running before you rely on discovery. It reports the address the daemon would use and where it came from, reads what the daemon has already learned out of the state database, and asks the device itself if nothing is on record yet:
+
+```
+OK    client "vanadium"  wake MAC  aa:bb:cc:dd:ee:01, from the configuration file
+OK    client "steel"     wake MAC  aa:bb:cc:00:00:01, discovered from the truenas API
+                                   and last confirmed 2 hours ago
+WARN  client "camera"    wake MAC  aa:bb:cc:00:00:07, discovered from the neighbour
+                                   table and last confirmed 30 days ago; the client
+                                   has not been seen up since. Set mac: to be certain
+FAIL  client "brick"     wake MAC  no mac: configured, and the ssh transport cannot
+                                   report one. Wake-on-LAN cannot run for this
+                                   client — set mac: on it
+```
+
+A client with no `wake:` section, or one woken by something other than WOL, needs no hardware address and is not checked.
 
 ---
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -297,6 +298,7 @@ func doctorCmd(configPath *string) *cobra.Command {
 				Timeout:      timeout,
 				SourceSettle: settle,
 			})
+			d.SetLearnedMACs(learnedMACs(cmd.Context(), cfg, logger))
 
 			fmt.Printf("Running preflight checks (this contacts every configured host)...\n\n")
 			report := d.Run(cmd.Context())
@@ -594,4 +596,39 @@ func warnIfNoAdminPassword(ctx context.Context, cfg *config.Config, db *state.DB
 		logger.Warn("no admin password is set; the API will reject all requests " +
 			"until one is created through the web UI's first-run screen")
 	}
+}
+
+// learnedMACs reads the hardware addresses the daemon has discovered.
+//
+// doctor runs as its own process, usually while the daemon is running, so
+// these come out of the shared state database. Without them doctor would
+// report a client as unwakeable whenever it happened to be off at that
+// moment, even though the daemon has known its address for weeks.
+//
+// Read-only and strictly best effort: a missing database is the normal
+// case before the first run, and nothing here is worth failing preflight
+// over.
+func learnedMACs(ctx context.Context, cfg *config.Config, logger *slog.Logger) map[string]state.LearnedMAC {
+	dbPath := filepath.Join(cfg.Canarium.DataDir, "state.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		// No database yet: the daemon has never run here.
+		return nil
+	}
+
+	db, err := state.Open(ctx, cfg.Canarium.DataDir)
+	if err != nil {
+		logger.Warn("could not read learned MAC addresses; doctor will look them up itself",
+			"error", err)
+		return nil
+	}
+	// Read-only, so a close failure has nothing to report.
+	defer db.Close() //nolint:errcheck // nothing was written
+
+	macs, err := db.LearnedMACs(ctx)
+	if err != nil {
+		logger.Warn("could not read learned MAC addresses; doctor will look them up itself",
+			"error", err)
+		return nil
+	}
+	return macs
 }
