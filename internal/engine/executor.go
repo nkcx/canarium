@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -390,11 +391,36 @@ func (e *Executor) restoreState() error {
 	if err != nil {
 		return err
 	}
+
+	// Only clients in the current configuration. client_states keeps a row
+	// for every client that has ever existed, so restoring all of them
+	// resurrected machines removed from the config months ago: a live
+	// deployment with `clients: []` reported five clients in /api/status,
+	// one of them "down", none of which Canarium would ever touch again.
+	// The rows are left in place rather than deleted, so a client that is
+	// put back in the config does not lose its history -- and its state is
+	// re-probed within one probe interval regardless.
+	configured := make(map[string]bool, len(e.cfg.Clients))
+	for _, c := range e.cfg.Clients {
+		configured[c.Name] = true
+	}
+
+	var orphaned []string
 	e.mu.Lock()
 	for name, stateStr := range states {
+		if !configured[name] {
+			orphaned = append(orphaned, name)
+			continue
+		}
 		e.clientStates[name] = ParseClientState(stateStr)
 	}
 	e.mu.Unlock()
+
+	if len(orphaned) > 0 {
+		slices.Sort(orphaned)
+		e.logger.Info("ignoring recorded state for clients no longer in the config",
+			"clients", orphaned)
+	}
 
 	seq, err := e.db.GetActiveSequence(e.ctx)
 	if err != nil {

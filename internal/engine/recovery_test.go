@@ -307,3 +307,40 @@ func TestPendingIntentsAreReconciled(t *testing.T) {
 		t.Errorf("%d intents are still pending after reconciliation", len(stillPending))
 	}
 }
+
+// TestRestoreIgnoresClientsNoLongerConfigured: client_states keeps a row for
+// every client that has ever existed. Restoring all of them resurrected
+// machines removed from the config -- a live deployment with `clients: []`
+// reported five clients in /api/status, one of them "down".
+func TestRestoreIgnoresClientsNoLongerConfigured(t *testing.T) {
+	h := newHarness(t, recoveryConfig())
+	ctx := t.Context()
+
+	if err := h.db.SaveClientState(ctx, "long-gone", "down", nil); err != nil {
+		t.Fatalf("SaveClientState: %v", err)
+	}
+	if err := h.db.SaveClientState(ctx, "compute1", "up", nil); err != nil {
+		t.Fatalf("SaveClientState: %v", err)
+	}
+
+	if err := h.exec.restoreState(); err != nil {
+		t.Fatalf("restoreState: %v", err)
+	}
+
+	states := h.exec.GetAllClientStates()
+	if _, ok := states["long-gone"]; ok {
+		t.Error("a client removed from the config was restored and will be reported as live")
+	}
+	if states["compute1"] != StateUp {
+		t.Errorf("compute1 = %s, want its recorded state restored", states["compute1"])
+	}
+
+	// Non-destructive: the history is still there if the client comes back.
+	recorded, err := h.db.GetClientState(ctx, "long-gone")
+	if err != nil {
+		t.Fatalf("GetClientState: %v", err)
+	}
+	if recorded != "down" {
+		t.Errorf("the orphaned row was deleted (now %q); it should be kept", recorded)
+	}
+}
