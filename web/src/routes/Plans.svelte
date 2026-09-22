@@ -54,7 +54,7 @@
 
       <section
         class="mb-10 border rounded-[var(--radius-lg)] overflow-hidden
-          {active ? 'border-amber/30 bg-amber/5' : 'border-edge bg-surface-50'}"
+          {active ? 'border-canary/30 bg-canary/5' : 'border-edge bg-surface-50'}"
         aria-labelledby="plan-{plan.name}"
       >
         <header class="px-5 py-4 border-b border-edge flex items-center gap-3 flex-wrap">

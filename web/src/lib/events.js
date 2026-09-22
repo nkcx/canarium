@@ -96,7 +96,7 @@ function humanize(type) {
  * shutdown command was sent and the host simply could not be positively
  * confirmed down, which is the normal outcome for a machine on a local
  * subnet whose budget ran short. Shown as a bare enum next to the same
- * amber dot that means "in progress", an operator reads it as an error.
+ * amber dot that meant "in progress", an operator reads it as an error.
  */
 export function stateLabel(state) {
   switch (state) {

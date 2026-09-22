@@ -387,3 +387,29 @@ Webhook consumers will see the new `would_trigger` event type.
 | `GET /api/status` | Adds `version` and `config_warnings`, the validation warnings from startup. Previously these were only logged. `clients` no longer includes clients removed from the configuration. |
 | `GET /api/clients`, `GET /api/plans` | Return `[]` rather than `null` when empty. |
 | `GET /api/facts` | `updated_at` is `null` for a fact that has never been reported, rather than `0001-01-01T00:00:00Z`. |
+
+---
+
+## New: the NUT source publishes NUT's standard variables
+
+It used to publish eight. Every poll already fetched the UPS's complete
+variable list and then discarded the rest, so readings a UPS does report —
+its real-power rating, input frequency, transfer thresholds, model — never
+reached Canarium. It now publishes NUT's standard set; see the guide's NUT
+section for the list.
+
+Existing fact names are unchanged, so existing conditions keep working. The
+new ones can be used in conditions like any other. Nothing outside the
+standard set is published — the serial number, for instance, is not — since
+facts appear in the API, the audit journal and webhook payloads.
+
+---
+
+## Changed: the interface matches the logo
+
+The palette moved from warm greys and amber to the logo's navy, canary and
+steel blue, and the logo is now in the interface and the favicon. The
+colours still mean what they meant — canary for "look here", green for
+healthy, orange for degraded, red for irreversible or failed — only the
+shades changed. The leftover Vite scaffolding that had been shipped in its
+place, including a purple lightning-bolt favicon nothing linked to, is gone.

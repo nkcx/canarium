@@ -1,51 +1,65 @@
 @import "tailwindcss";
 
 @theme {
-  /* Surfaces. One hue, lightness only, so the space never fragments. */
-  --color-surface-0: #111214;
-  --color-surface-50: #16181b;
-  --color-surface-100: #1b1d21;
-  --color-surface-200: #22252a;
-  --color-surface-300: #2a2d33;
+  /*
+   * The palette is drawn from the logo, not chosen alongside it.
+   *
+   * The UI used to be warm brown-greys with a mustard amber, next to a logo
+   * that is a canary-yellow bird on a steel-blue disc outlined in navy --
+   * two unrelated colour schemes on one product. The surfaces are now the
+   * logo's navy outline, lightened in steps; the accents are the bird, its
+   * beak, its leaf and its disc.
+   *
+   * Surfaces: one hue, lightness only, so the space never fragments.
+   */
+  --color-surface-0: #0b1624;
+  --color-surface-50: #0f1c2d;
+  --color-surface-100: #132337;
+  --color-surface-200: #1a2d45;
+  --color-surface-300: #223853;
 
-  /* A four-step text ramp: primary, secondary, metadata, decoration. */
-  --color-ink: #e8e6e3;
-  --color-ink-secondary: #a09b94;
-  --color-ink-muted: #6b665f;
-  --color-ink-faint: #3d3a36;
+  /*
+   * A four-step text ramp: primary, secondary, metadata, tertiary. Every
+   * step through muted clears WCAG AA (4.5:1) on every surface. Faint is
+   * about 3:1 and is only for tertiary text such as timestamps; it was
+   * about 1.7:1 in the previous palette, which was below any usable bar.
+   */
+  --color-ink: #e6f0f7;
+  --color-ink-secondary: #a6bacd;
+  --color-ink-muted: #7a91a8;
+  --color-ink-faint: #56708f;
 
-  --color-edge: #2e2b27;
-  --color-edge-subtle: #242220;
-  --color-edge-strong: #3d3a36;
+  --color-edge: #213752;
+  --color-edge-subtle: #172940;
+  --color-edge-strong: #2e4866;
 
   /*
    * Colour means one thing each, and only one.
    *
-   *   amber   live: something is happening right now and you should look
-   *   ok      healthy: up, connected, recovered
-   *   warn    degraded: stale, unverified, holding
+   *   canary  live: something is happening right now and you should look
+   *   ok      healthy: up, connected, recovered          (the leaf)
+   *   warn    degraded: stale, unverified, holding       (the beak)
    *   danger  irreversible or failed, and nothing else
-   *   info    inert commentary (dry-run)
+   *   info    inert commentary, such as dry-run          (the disc)
    *
-   * Amber previously did four jobs at once -- wordmark, sequence state,
-   * every event type in the log, and the active-sequence border -- so on a
-   * screen with six log rows it stopped meaning anything. It is now spent
-   * only where the operator should actually look.
+   * Canary is spent only where the operator should actually look. It is
+   * also the brand, which is the point: the product is named for the
+   * bird that warns you first.
    */
-  --color-amber: #d4a017;
-  --color-amber-dim: #a67c14;
-  --color-amber-glow: #f0b429;
+  --color-canary: #f8dc23;
+  --color-canary-dim: #c9b21c;
+  --color-canary-glow: #ffe95c;
 
-  --color-ok: #4a9e6e;
-  --color-warn: #c4851c;
-  --color-danger: #c44b4b;
-  --color-info: #4a7eb5;
+  --color-ok: #74ac48;
+  --color-warn: #faa326;
+  --color-danger: #f06262;
+  --color-info: #7aa7d0;
 
-  --color-control: #1b1d21;
-  --color-control-border: #2e2b27;
-  --color-control-focus: #d4a017;
+  --color-control: #132337;
+  --color-control-border: #213752;
+  --color-control-focus: #f8dc23;
 
-  --font-mono: "Berkeley Mono", "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
+--font-mono: "Berkeley Mono", "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
 
   /*
    * A type scale, rather than six near-adjacent sizes.
@@ -103,7 +117,7 @@ h1, h2, h3 {
  * Abort Sequence and Force stage to proceed -- with no focus state at all.
  */
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--color-amber);
+  outline: 2px solid var(--color-canary);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }

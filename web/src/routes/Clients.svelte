@@ -45,7 +45,7 @@
           class="w-full text-left px-4 py-3 min-h-14 transition-colors border-l-2
             {i > 0 ? 'border-t border-t-edge-subtle' : ''}
             {selected === client.name
-              ? 'bg-surface-100 border-l-amber'
+              ? 'bg-surface-100 border-l-canary'
               : 'border-l-transparent hover:bg-surface-50'}"
           aria-current={selected === client.name ? 'true' : undefined}
           onclick={() => (selected = client.name)}

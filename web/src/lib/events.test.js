@@ -108,7 +108,7 @@ describe('describeEvent', () => {
 
 describe('client state presentation', () => {
   it('says down_unverified in words, and says it is not a failure', () => {
-    // Shown as a bare enum next to the same amber dot that means "in
+    // Shown as a bare enum next to the same amber dot that meant "in
     // progress", an operator reads this as an error. The docs go to
     // lengths to explain that it is not one.
     expect(stateLabel('down_unverified')).toBe('down (unconfirmed)');

@@ -19,7 +19,7 @@
 
   const variants = {
     primary:
-      'bg-amber/10 border-amber/40 text-amber hover:bg-amber/20 hover:border-amber/60',
+      'bg-canary/10 border-canary/40 text-canary hover:bg-canary/20 hover:border-canary/60',
     default:
       'bg-surface-100 border-edge text-ink-secondary hover:border-edge-strong hover:text-ink',
     danger:

@@ -5,7 +5,7 @@
 
   const tones = {
     default: 'border-edge bg-surface-50',
-    live: 'border-amber/30 bg-amber/5',
+    live: 'border-canary/30 bg-canary/5',
     danger: 'border-danger/40 bg-danger/5',
     warn: 'border-warn/40 bg-warn/5',
   };

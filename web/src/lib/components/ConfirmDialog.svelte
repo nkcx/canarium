@@ -122,7 +122,7 @@
             disabled:opacity-35 disabled:pointer-events-none
             {confirmVariant === 'danger'
               ? 'bg-danger/15 border-danger/60 text-danger hover:bg-danger/25'
-              : 'bg-amber/15 border-amber/60 text-amber hover:bg-amber/25'}"
+              : 'bg-canary/15 border-canary/60 text-canary hover:bg-canary/25'}"
         >
           {busy ? 'Working…' : confirmLabel}
         </button>

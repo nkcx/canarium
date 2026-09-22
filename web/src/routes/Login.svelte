@@ -35,11 +35,11 @@
 <div class="min-h-screen flex items-center justify-center bg-surface-0 px-4 py-10">
   <div class="w-full max-w-xs">
     <div class="text-center mb-8">
-      <div class="inline-flex items-center gap-2">
-        <span class="w-2 h-2 rounded-full bg-amber" aria-hidden="true"></span>
-        <span class="text-ink font-bold text-value tracking-[0.12em]">CANARIUM</span>
-      </div>
-      <div class="text-ink-muted text-meta mt-1.5">power orchestrator</div>
+      <!-- The logo already spells the name, so its alt text is the name and
+           there is no second heading repeating it. -->
+      <img src="/logo.webp" alt="Canarium" width="220" height="236"
+        class="mx-auto w-[220px] h-auto" />
+      <div class="text-ink-muted text-meta mt-2">power orchestrator</div>
     </div>
 
     <form onsubmit={e => { e.preventDefault(); handleSubmit(); }}>

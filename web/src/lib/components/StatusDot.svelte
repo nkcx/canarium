@@ -4,7 +4,7 @@
   export let label = '';
 
   const tones = {
-    live: 'bg-amber',
+    live: 'bg-canary',
     ok: 'bg-ok',
     warn: 'bg-warn',
     danger: 'bg-danger',

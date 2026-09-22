@@ -152,7 +152,7 @@
       <button
         class="w-full text-left px-4 py-3 border rounded-[var(--radius-md)] transition-colors
           {active
-            ? 'border-amber/50 bg-amber/5'
+            ? 'border-canary/50 bg-canary/5'
             : 'border-edge bg-surface-50 hover:border-edge-strong'}
           disabled:opacity-40 disabled:pointer-events-none"
         onclick={() => requestMode(mode.id)}

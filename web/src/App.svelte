@@ -116,8 +116,9 @@
         {/if}
       </button>
 
-      <span class="font-bold text-body tracking-[0.12em] text-ink">
-        CANARIUM
+      <span class="flex items-center gap-2">
+        <img src="/mark.webp" alt="" width="24" height="24" class="w-6 h-6 rounded-full" />
+        <span class="font-bold text-body tracking-[0.12em] text-ink">CANARIUM</span>
       </span>
 
       <div class="ml-auto flex items-center gap-2">
@@ -154,13 +155,14 @@
         md:static md:w-52 md:shrink-0 md:translate-x-0 md:border-r"
     >
       <div class="p-4 border-b border-edge">
-        <!-- The wordmark is ink, not amber: identity does not need to spend
-             the one colour reserved for "look here". -->
-        <div class="flex items-center gap-2">
-          <span class="w-1.5 h-1.5 rounded-full bg-amber" aria-hidden="true"></span>
+        <!-- The mascot carries the identity, so the wordmark can stay ink
+             rather than spending the colour reserved for "look here". -->
+        <div class="flex items-center gap-2.5">
+          <img src="/mark.webp" alt="" width="36" height="36"
+            class="w-9 h-9 rounded-full shrink-0" />
           <span class="text-ink font-bold text-body tracking-[0.12em]">CANARIUM</span>
         </div>
-        <div class="text-ink-muted text-meta mt-1 pl-3.5">power orchestrator</div>
+        <div class="text-ink-muted text-meta mt-1.5">power orchestrator</div>
       </div>
 
       <div class="flex-1 py-2 overflow-y-auto">
@@ -169,7 +171,7 @@
             class="w-full text-left px-4 min-h-11 py-2.5 text-body transition-colors
               border-l-2
               {currentView === view.id
-                ? 'text-ink bg-surface-100 border-l-amber'
+                ? 'text-ink bg-surface-100 border-l-canary'
                 : 'text-ink-secondary border-l-transparent hover:text-ink hover:bg-surface-50'}"
             aria-current={currentView === view.id ? 'page' : undefined}
             onclick={() => go(view.id)}

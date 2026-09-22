@@ -9,7 +9,7 @@
   export let title = undefined;
 
   const tones = {
-    live: 'bg-amber/15 text-amber border-amber/30',
+    live: 'bg-canary/15 text-canary border-canary/30',
     ok: 'bg-ok/15 text-ok border-ok/30',
     warn: 'bg-warn/15 text-warn border-warn/30',
     danger: 'bg-danger/15 text-danger border-danger/30',

@@ -14,7 +14,7 @@
   $: reading = currentReading(ex);
   $: dwell = dwellText(ex);
 
-  const toneText = { ok: 'text-ok', live: 'text-amber', neutral: 'text-ink-muted', warn: 'text-warn' };
+  const toneText = { ok: 'text-ok', live: 'text-canary', neutral: 'text-ink-muted', warn: 'text-warn' };
 </script>
 
 <div class={depth > 0 ? 'pl-4 border-l border-edge-subtle' : ''}>
