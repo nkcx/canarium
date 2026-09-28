@@ -11,7 +11,7 @@ toolchain go1.26.8
 require (
 	github.com/expr-lang/expr v1.17.8
 	github.com/gorilla/websocket v1.5.3
-	github.com/gosnmp/gosnmp v1.44.0
+	github.com/gosnmp/gosnmp v1.45.0
 	github.com/spf13/cobra v1.10.2
 	github.com/warthog618/go-gpiocdev v0.9.1
 	golang.org/x/crypto v0.57.0
