@@ -539,3 +539,32 @@ the state database — read-only, and skipped entirely if there is no database
 yet. Without that it would report a client as unwakeable whenever it
 happened to be off at the moment doctor ran, even though the daemon has
 known its address for weeks.
+
+---
+
+## Security: upgrade from 0.1.5 or earlier
+
+**0.1.5 and every release before it were built on a Go toolchain affected by
+ten standard-library vulnerabilities.** They are in `net/http`,
+`net/http/internal/http2`, `net/textproto` and `crypto/tls` — the packages
+Canarium uses to terminate its own authenticated API and to talk to Proxmox,
+TrueNAS, OPNsense and NUT over TLS.
+
+They were published after 0.1.5 shipped, so its CI was green at the time.
+0.1.6 is built on Go 1.27.2, which fixes all ten, and `govulncheck` reports
+clean.
+
+Nothing is required of you beyond pulling the new image:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+No configuration changes, no schema changes, no behaviour changes. If you
+pin a version, move the pin to `0.1.6`.
+
+### Why not 1.27.1
+
+Dependabot offered Go 1.27.1. It is affected by the same ten; only 1.27.2
+fixes them. Worth knowing if you build Canarium yourself: check with
+`govulncheck ./...` rather than assuming the newest minor is safe.
