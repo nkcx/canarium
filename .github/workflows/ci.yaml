@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.2"
           cache: true
 
       - uses: actions/setup-node@v7
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.2"
           cache: true
 
       - uses: golangci/golangci-lint-action@v9
@@ -86,18 +86,13 @@ jobs:
           # This is the linter's own version, not the action's.
           #
           # golangci-lint refuses to analyse a module whose targeted Go
-          # version is newer than the one it was itself built with, so the
-          # Go toolchain cannot move ahead of it. v2.13.2 is built against
-          # Go 1.26, which is why go.mod, the Dockerfile and the go-version
-          # above are all still on 1.26.8: bumping them to 1.27 produces
-          #
-          #   the Go language version (go1.26) used to build golangci-lint
-          #   is lower than the targeted Go version (1.27.0)
-          #
-          # and the lint job fails. Dependabot will keep offering the Go
-          # bump; it is only safe once a golangci-lint release built on the
-          # newer toolchain exists. Move both together, or neither.
-          version: v2.13.2
+          # version is newer than the one it was itself built with, so this
+          # version and the Go toolchain move together or not at all.
+          # v2.14.0 is built with go1.27.0, which is what allowed go.mod,
+          # the Dockerfile and the go-version above to move to 1.27.1 --
+          # verified by running the published binary against this module,
+          # not by assuming the release notes.
+          version: v2.14.0
 
   build-image:
     runs-on: ubuntu-latest
