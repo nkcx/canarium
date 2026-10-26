@@ -24,7 +24,7 @@ RUN npm run build
 # toolchain can cross-compile natively on the build host. This avoids
 # emulating the entire toolchain under QEMU for arm/arm64 targets.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS backend
 
 ARG TARGETOS
 ARG TARGETARCH
